@@ -1,0 +1,18 @@
+WezTerm Mobile
+==============
+
+This repository contains two bodies of work:
+
+1. The `wezterm/` directory is a vendored copy of WezTerm
+   (https://github.com/wez/wezterm), release 20240203-110809-5046fc22,
+   Copyright (c) Wez Furlong and contributors, licensed under the MIT license
+   (see wezterm/LICENSE.md). It is included with small modifications documented
+   in docs/UPSTREAM-CHANGES.md (iOS portability, dependency feature gating, and
+   two new crates: wezterm/wezterm-ios-core and wezterm/poc-attach).
+
+2. Everything else (the iOS application under ios/, the new crates, and the
+   documentation) is Copyright (c) 2026 Nyaga, licensed under the MIT license
+   (see LICENSE).
+
+WezTerm Mobile is an independent project and is not affiliated with or endorsed
+by the WezTerm project.

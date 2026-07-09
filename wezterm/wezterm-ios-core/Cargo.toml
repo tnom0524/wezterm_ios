@@ -1,0 +1,32 @@
+[package]
+name = "wezterm-ios-core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "wezterm_ios_core"
+# lib      -> examples / uniffi-bindgen bin link against the rlib
+# cdylib   -> uniffi-bindgen "library mode" reads metadata from the dylib
+# staticlib-> next phase: iOS XCFramework
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[[bin]]
+# uniffi-bindgen CLI wrapper (Swift binding generation)
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[dependencies]
+anyhow = "1.0"
+thiserror = "1.0"
+codec = { path = "../codec" }
+mux = { path = "../mux", default-features = false }
+termwiz = { path = "../termwiz" }
+# TerminalSize (SpawnV2 / Resize) と color::ColorPalette のため
+wezterm-term = { path = "../term" }
+# SpawnV2.domain の SpawnTabDomain のため
+config = { path = "../config" }
+# mux が Utc::now() を使うが、-p 単体ビルドでは他クレート由来の
+# feature 統合が効かないため、ここで clock を有効化する（poc-attach と同様）
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# UniFFI: proc-macro (UDLレス) モード。cli feature で uniffi-bindgen 同梱。
+uniffi = { version = "0.32", features = ["cli"] }

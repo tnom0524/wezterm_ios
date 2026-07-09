@@ -1,0 +1,52 @@
+name: WeztermMobile
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "18.0"
+  xcodeVersion: "16.0"
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    ENABLE_BITCODE: NO
+
+configs:
+  Debug: debug
+  Release: release
+
+targets:
+  WeztermMobile:
+    type: application
+    platform: iOS
+    deploymentTarget: "18.0"
+    sources:
+      - path: WeztermMobile
+        excludes:
+          - "Generated/wezterm_ios_coreFFI.h"
+          - "Generated/wezterm_ios_coreFFI.modulemap"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.weztermmobile
+        PRODUCT_NAME: WeztermMobile
+        INFOPLIST_FILE: WeztermMobile/Info.plist
+        OTHER_LDFLAGS: "-lc++"
+        # Automatic signing — set DEVELOPMENT_TEAM once Apple ID is registered.
+        # Override via: xcodebuild ... DEVELOPMENT_TEAM=<team-id>
+        # or set the environment variable before running xcodegen.
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: "$(DEVELOPMENT_TEAM)"
+      configs:
+        Debug:
+          # Simulator builds: no signing required
+          CODE_SIGNING_ALLOWED: NO
+          CODE_SIGNING_REQUIRED: NO
+          CODE_SIGN_IDENTITY: ""
+        Release:
+          # Device builds: signing required (set DEVELOPMENT_TEAM first)
+          CODE_SIGNING_ALLOWED: YES
+          CODE_SIGNING_REQUIRED: YES
+          CODE_SIGN_IDENTITY: "Apple Development"
+    dependencies:
+      - framework: WeztermIOSCore.xcframework
+        embed: true

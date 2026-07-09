@@ -1,0 +1,20 @@
+[package]
+name = "poc-attach"
+version = "0.1.0"
+edition = "2018"
+
+[dependencies]
+anyhow = "1.0"
+codec = { path = "../codec" }
+mux = { path = "../mux" }
+termwiz = { path = "../termwiz" }
+# SpawnV2 / Resize が要求する TerminalSize 型のため
+wezterm-term = { path = "../term" }
+# SpawnV2.domain の SpawnTabDomain のため
+config = { path = "../config" }
+# mux が Utc::now() を使うが、-p 単体ビルドでは他クレート由来の
+# feature 統合が効かないため、ここで clock を有効化する
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# ローカル端末の raw mode / ウィンドウサイズ取得 / SIGWINCH
+libc = "0.2"
+signal-hook = "0.3"
