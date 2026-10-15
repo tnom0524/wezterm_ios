@@ -4,8 +4,11 @@ import SwiftUI
 struct WeztermMobileApp: App {
     var body: some Scene {
         WindowGroup {
-            ConnectView()
+            if UIDevice.current.userInterfaceIdiom == .pad {
+                PadRootView()
+            } else {
+                ConnectView()   // iPhone: 既存フローそのまま
+            }
         }
     }
 }
-

@@ -121,6 +121,7 @@ impl PaneState {
             physical_top: self.dims.physical_top as i64,
             scrollback_top: self.dims.scrollback_top as i64,
             mouse_grabbed: self.mouse_grabbed,
+            cursor_visible: self.cursor.visibility == termwiz::surface::CursorVisibility::Visible,
         }
     }
 }

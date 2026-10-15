@@ -15,7 +15,13 @@ ios/WeztermMobile/Generated/
 # Screenshots from the author's real sessions (retake your own)
 ios/screenshots/
 
+# Personal local notes (contain device UDID / team ID — never publish)
+*.local.md
+
 # Tooling / OS noise
 .claude/
 .DS_Store
 *.xcresult
+
+# Xcode build output
+ios/build/

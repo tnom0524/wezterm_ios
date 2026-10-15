@@ -34,6 +34,38 @@ private struct ScrollMetrics: Equatable {
     var containerH: CGFloat
 }
 
+// MARK: - Plain text builder (free function, closure からも参照できるよう外部化)
+
+/// ターミナルコンテンツのプレーンテキスト変換。
+/// mouseGrabbed ペインは履歴非表示のためライブビューポートのみ出力する。
+@MainActor
+private func buildPlainText(snap: Snapshot, store: ConnectionStore) -> String {
+    var lines: [String] = []
+
+    // 1) 取得済み履歴行（mouseGrabbed 時は表示しないので含めない）
+    if !snap.mouseGrabbed {
+        for idx in store.loadedHistoryTop..<store.physicalTop {
+            let row = store.rowCache[idx] ?? Row(spans: [])
+            lines.append(row.spans.map(\.text).joined())
+        }
+    }
+
+    // 2) ライブビューポート行（snapshot 由来）
+    for row in snap.rows {
+        lines.append(row.spans.map(\.text).joined())
+    }
+
+    // 各行末尾の空白をトリム
+    lines = lines.map { $0.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression) }
+
+    // 末尾の空行をドロップ
+    while let last = lines.last, last.isEmpty {
+        lines.removeLast()
+    }
+
+    return lines.joined(separator: "\n")
+}
+
 // MARK: - TerminalView
 
 struct TerminalView: View {
@@ -48,6 +80,12 @@ struct TerminalView: View {
     // MARK: IME composing state
     /// 変換中テキスト（nil = IME非活性）。KeyInputView のストリップ表示に使う
     @State private var composingText: String? = nil
+
+    // MARK: Copy sheet state
+    /// コピーシートへ渡すペイロード（非 nil でシートが開く）
+    @State private var copyPayload: CopyPayload? = nil
+    /// コピーシートの「さらに読み込む」クロージャ（mouseGrabbed 時は nil）
+    @State private var copyLoadOlder: (() async -> String?)? = nil
 
     // MARK: Scrollback state
     /// true = コンテンツ下端がビュー下端の 1.5 行以内（ライブ追従モード）
@@ -100,19 +138,34 @@ struct TerminalView: View {
 
             KeyInputView(store: store,
                          isKeyboardShown: $isKeyboardShown,
-                         composingText: $composingText)
+                         composingText: $composingText,
+                         onCopyRequest: {
+                             if let snap = store.snapshot { openCopySheet(snap: snap) }
+                         })
                 .frame(height: 44)
         }
         .background(Color.black)
         .navigationTitle("Pane \(pane.paneId)")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            // コピーシートを開くボタン（ペインタイトルの左に配置）
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button {
+                    guard let snap = store.snapshot else { return }
+                    openCopySheet(snap: snap)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                }
+            }
             ToolbarItem(placement: .navigationBarTrailing) {
                 Text(pane.title)
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .lineLimit(1)
             }
+        }
+        .sheet(item: $copyPayload) { payload in
+            CopySheetView(text: payload.text, loadOlder: copyLoadOlder)
         }
         .toolbarColorScheme(.dark, for: .navigationBar)
         .preferredColorScheme(.dark)
@@ -124,6 +177,23 @@ struct TerminalView: View {
             if let reason = store.disconnectReason {
                 disconnectBanner(reason: reason)
             }
+        }
+    }
+
+    // MARK: - Copy sheet helper
+
+    /// コピーシートを開く。ペイロードと「さらに読み込む」クロージャをまとめてセットする。
+    private func openCopySheet(snap: Snapshot) {
+        copyPayload = CopyPayload(text: buildPlainText(snap: snap, store: store))
+        if !snap.mouseGrabbed {
+            // store はクラス参照なので直接キャプチャして問題ない
+            copyLoadOlder = { [store] in
+                let loaded = await store.fetchOlderHistory(chunk: 500)
+                guard loaded, let currentSnap = store.snapshot else { return nil }
+                return buildPlainText(snap: currentSnap, store: store)
+            }
+        } else {
+            copyLoadOlder = nil
         }
     }
 
@@ -162,6 +232,12 @@ struct TerminalView: View {
             .background(Color.black)
             .simultaneousGesture(
                 TapGesture().onEnded { isKeyboardShown = true }
+            )
+            // ロングプレスでコピーシートを即座に開く
+            .simultaneousGesture(
+                LongPressGesture(minimumDuration: 0.5).onEnded { _ in
+                    openCopySheet(snap: snap)
+                }
             )
             // スクロール転送ジェスチャ: ローカル履歴がない（転送モード）ときのみ有効
             .simultaneousGesture(
@@ -208,6 +284,10 @@ struct TerminalView: View {
             // iOS 18: ユーザー操作フェーズを追跡（操作中は自動追従しない）
             .onScrollPhaseChange { _, newPhase in
                 scrollPhase = newPhase
+                // mouseGrabbed ペインはサーバー再描画を止めてはならない
+                if let snap = store.snapshot, !snap.mouseGrabbed {
+                    store.setRenderFrozen(newPhase != .idle)
+                }
             }
             // 注意: Snapshot受信ごとの proxy.scrollTo は絶対にしないこと。
             // 高頻度出力(スピナー等)でスクロールジェスチャがキャンセルされ続け、
@@ -215,10 +295,10 @@ struct TerminalView: View {
             // がジェスチャと競合せずに行う。
             .onChange(of: store.snapshot) { _, _ in
                 // 履歴の先行ロード: 未取得のscrollbackが残っていて、かつロード済みが
-                // 100行未満の間は自動で補充する（スクロール余地の確保）
+                // 500行未満の間は自動で補充する（スクロール余地の確保）
                 if !isLoadingHistory,
                    store.scrollbackTop < store.loadedHistoryTop,
-                   store.physicalTop - store.loadedHistoryTop < 100 {
+                   store.physicalTop - store.loadedHistoryTop < 500 {
                     triggerHistoryLoad()
                 }
             }
@@ -333,13 +413,15 @@ struct TerminalView: View {
 
     private func buildAttributedStringForSnap(snap: Snapshot) -> AttributedString {
         var result = AttributedString()
+        // カーソル非表示時は cursorRow に -1 を渡してカーソル描画を抑制する
+        let activeCursorRow = snap.cursorVisible ? Int(snap.cursorRow) : -1
         for (rowIdx, row) in snap.rows.enumerated() {
             if rowIdx > 0 {
                 result += AttributedString("\n")
             }
             result += buildAttributedString(
                 row: row,
-                cursorRow: Int(snap.cursorRow),
+                cursorRow: activeCursorRow,
                 cursorCol: Int(snap.cursorCol),
                 rowIdx: rowIdx
             )
@@ -354,44 +436,114 @@ struct TerminalView: View {
         rowIdx: Int
     ) -> AttributedString {
         var result = AttributedString()
+        // colOffset はターミナルセル幅単位で累積する（全角文字=2セル）
         var colOffset = 0
-        for span in row.spans {
-            var attr = AttributedString(span.text)
+        let isCursorRow = rowIdx == cursorRow
 
-            // Colors (0xRRGGBBAA)
+        for span in row.spans {
             let fg = uiColor(from: span.fg)
             let bg = uiColor(from: span.bg)
-            attr.foregroundColor = fg
-            attr.backgroundColor = bg
 
-            // Font traits
+            // フォントトレイト
             var traits: UIFontDescriptor.SymbolicTraits = []
             if span.flags & FLAG_BOLD != 0 { traits.insert(.traitBold) }
             if span.flags & FLAG_ITALIC != 0 { traits.insert(.traitItalic) }
-
-            let baseFont = terminalBaseFont
+            let spanFont: UIFont
             if !traits.isEmpty,
-               let desc = baseFont.fontDescriptor.withSymbolicTraits(traits) {
-                attr.font = UIFont(descriptor: desc, size: terminalFontSize)
+               let desc = terminalBaseFont.fontDescriptor.withSymbolicTraits(traits) {
+                spanFont = UIFont(descriptor: desc, size: terminalFontSize)
             } else {
-                attr.font = baseFont
+                spanFont = terminalBaseFont
             }
 
-            if span.flags & FLAG_UNDERLINE != 0 {
-                attr.underlineStyle = .single
+            // カーソルがこのスパンのセル範囲内にあるか判定
+            let spanCellWidth = span.text.reduce(0) { $0 + cellWidth(of: $1) }
+            let spanStart = colOffset
+            let spanEnd   = colOffset + spanCellWidth
+
+            if isCursorRow && spanStart <= cursorCol && cursorCol < spanEnd {
+                // スパン内にカーソルがある: before / cursorChar / after に分割して描画
+                var beforeCells = 0
+                var beforeStr   = ""
+                var cursorStr   = ""
+                var afterStr    = ""
+                var pastCursor  = false
+
+                for ch in span.text {
+                    let w = cellWidth(of: ch)
+                    if pastCursor {
+                        afterStr.append(ch)
+                    } else if beforeCells + w > cursorCol - spanStart {
+                        // このキャラクタがカーソルセル
+                        cursorStr.append(ch)
+                        pastCursor = true
+                    } else {
+                        beforeStr.append(ch)
+                        beforeCells += w
+                    }
+                }
+
+                // before 部分（通常スタイル）
+                if !beforeStr.isEmpty {
+                    var a = AttributedString(beforeStr)
+                    a.foregroundColor = fg
+                    a.backgroundColor = bg
+                    a.font = spanFont
+                    if span.flags & FLAG_UNDERLINE != 0 { a.underlineStyle = .single }
+                    result += a
+                }
+
+                // カーソル文字（反転ハイライト）
+                if !cursorStr.isEmpty {
+                    var a = AttributedString(cursorStr)
+                    a.foregroundColor = bg   // 前景に元背景色
+                    a.backgroundColor = fg   // 背景に元前景色
+                    a.font = spanFont
+                    if span.flags & FLAG_UNDERLINE != 0 { a.underlineStyle = .single }
+                    result += a
+                }
+
+                // after 部分（通常スタイル）
+                if !afterStr.isEmpty {
+                    var a = AttributedString(afterStr)
+                    a.foregroundColor = fg
+                    a.backgroundColor = bg
+                    a.font = spanFont
+                    if span.flags & FLAG_UNDERLINE != 0 { a.underlineStyle = .single }
+                    result += a
+                }
+            } else {
+                // カーソルなし: スパン全体を通常スタイルで描画
+                var attr = AttributedString(span.text)
+                attr.foregroundColor = fg
+                attr.backgroundColor = bg
+                attr.font = spanFont
+                if span.flags & FLAG_UNDERLINE != 0 { attr.underlineStyle = .single }
+                result += attr
             }
 
-            // Cursor: reverse-highlight the cursor cell（snapshot 行のみ）
-            if rowIdx == cursorRow &&
-               colOffset <= cursorCol &&
-               cursorCol < colOffset + span.text.count {
-                attr.backgroundColor = fg
-                attr.foregroundColor = bg
-            }
-
-            result += attr
-            colOffset += span.text.count
+            colOffset = spanEnd
         }
+
+        // カーソルが行末より後ろにある場合（シェルプロンプト待受の常見ケース）:
+        // スパンループで reverse-highlight されなかったので、ここで末端カーソルを描画する。
+        // 履歴行は cursorRow: -1 で呼ばれるため、このガードが自動的にスキップする。
+        if isCursorRow && cursorCol >= colOffset {
+            // カーソル位置まで空白でパディング（セル単位）
+            let padCount = cursorCol - colOffset
+            if padCount > 0 {
+                var pad = AttributedString(String(repeating: " ", count: padCount))
+                pad.font = terminalBaseFont
+                result += pad
+            }
+            // ブロックカーソル: 白背景 + 黒文字
+            var cursor = AttributedString(" ")
+            cursor.font = terminalBaseFont
+            cursor.backgroundColor = Color.white.opacity(0.7)
+            cursor.foregroundColor = .black
+            result += cursor
+        }
+
         return result
     }
 
@@ -401,6 +553,35 @@ struct TerminalView: View {
         let b = Double((rgba >> 8)  & 0xFF) / 255.0
         let a = Double(rgba         & 0xFF) / 255.0
         return Color(red: r, green: g, blue: b, opacity: a)
+    }
+
+    // MARK: - Wide character cell width
+
+    /// 簡易wcwidth。weztermのセル幅と概ね一致すればよい。
+    /// 東アジア広字/全角文字は2セル、それ以外は1セルとする。
+    private func cellWidth(of ch: Character) -> Int {
+        guard let scalar = ch.unicodeScalars.first else { return 1 }
+        let v = scalar.value
+        switch v {
+        case 0x1100...0x115F,   // ハングル字母
+             0x2E80...0x303E,   // CJK部首補助〜和文記号
+             0x3041...0x33FF,   // ひらがな〜CJK互換
+             0x3400...0x4DBF,   // CJK統合漢字拡張A
+             0x4E00...0x9FFF,   // CJK統合漢字
+             0xA000...0xA4CF,   // 彝文字
+             0xAC00...0xD7A3,   // ハングル音節
+             0xF900...0xFAFF,   // CJK互換漢字
+             0xFE30...0xFE4F,   // CJK互換形
+             0xFF00...0xFF60,   // 全角英数・半角カタカナ等
+             0xFFE0...0xFFE6,   // 全角記号
+             0x1F300...0x1F64F, // 絵文字(顔・記号)
+             0x1F900...0x1FAFF, // 絵文字補助
+             0x20000...0x2FFFD, // CJK統合漢字拡張B-F
+             0x30000...0x3FFFD: // CJK統合漢字拡張G+
+            return 2
+        default:
+            return 1
+        }
     }
 
     // MARK: - Scroll event forwarding

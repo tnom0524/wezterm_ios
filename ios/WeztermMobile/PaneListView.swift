@@ -11,6 +11,13 @@ struct PaneListView: View {
         ProcessInfo.processInfo.arguments.contains("--autoattach")
     }
 
+    /// 起動引数 --attach-pane <id> で特定ペインに自動 attach する（自動テスト用）
+    private var attachPaneId: UInt64? {
+        let args = ProcessInfo.processInfo.arguments
+        guard let idx = args.firstIndex(of: "--attach-pane"), idx + 1 < args.count else { return nil }
+        return UInt64(args[idx + 1])
+    }
+
     var body: some View {
         Group {
             if let reason = store.disconnectReason {
@@ -37,7 +44,10 @@ struct PaneListView: View {
         .onAppear {
             Task {
                 await store.refreshPanes()
-                if autoAttach, let active = store.panes.first(where: { $0.active }) ?? store.panes.first {
+                if let pid = attachPaneId, let target = store.panes.first(where: { $0.paneId == pid }) {
+                    await store.attach(pane: target)
+                    selectedPane = target
+                } else if autoAttach, let active = store.panes.first(where: { $0.active }) ?? store.panes.first {
                     await store.attach(pane: active)
                     selectedPane = active
                 }

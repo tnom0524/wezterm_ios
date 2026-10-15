@@ -21,8 +21,8 @@ use crate::pane_state::PaneState;
 use crate::transport::{TcpTransport, Transport};
 use anyhow::Context as _;
 use codec::{
-    GetCodecVersion, GetLines, GetPaneRenderChanges, KillPane, ListPanes, Pdu, Resize, SetClientId,
-    SpawnV2, WriteToPane, CODEC_VERSION,
+    GetCodecVersion, GetLines, GetPaneRenderChanges, KillPane, ListPanes, Pdu, Resize, SendPaste,
+    SetClientId, SpawnV2, WriteToPane, CODEC_VERSION,
 };
 use mux::client::ClientId;
 use mux::pane::PaneId;
@@ -74,6 +74,8 @@ pub struct Snapshot {
     pub scrollback_top: i64,
     /// マウスが掴まれているか（アプリ側スクロール vs ターミナルへ転送の判定に使う）。
     pub mouse_grabbed: bool,
+    /// カーソルが表示状態かどうか（false = Hidden, true = Visible）。
+    pub cursor_visible: bool,
 }
 
 #[derive(uniffi::Record, Clone, Debug)]
@@ -126,6 +128,12 @@ pub(crate) enum Command {
     SendInput {
         pane_id: u64,
         data: Vec<u8>,
+        reply: Reply<()>,
+    },
+    /// クリップボード文字列をブラケットペーストとしてペインへ送る（fire-and-forget）。
+    SendPaste {
+        pane_id: u64,
+        text: String,
         reply: Reply<()>,
     },
     Resize {
@@ -203,6 +211,16 @@ impl MuxClient {
         self.dispatch(|reply| Command::SendInput {
             pane_id,
             data,
+            reply,
+        })
+    }
+
+    /// クリップボード文字列をブラケットペーストとしてペインへ送る（SendPaste PDU）。
+    /// サーバー側がブラケットペーストのエスケープを処理する。
+    pub fn send_paste(&self, pane_id: u64, text: String) -> Result<(), IosCoreError> {
+        self.dispatch(|reply| Command::SendPaste {
+            pane_id,
+            text,
             reply,
         })
     }
@@ -392,6 +410,22 @@ impl Engine {
                     .send(Pdu::WriteToPane(WriteToPane {
                         pane_id: pane_id as PaneId,
                         data,
+                    }))
+                    .map(|_| ())
+                    .map_err(|e| format!("{:#}", e));
+                let _ = reply.send(res);
+            }
+            Command::SendPaste {
+                pane_id,
+                text,
+                reply,
+            } => {
+                // SendPaste PDU を送る。サーバー側でブラケットペーストのラップを行う。
+                let res = self
+                    .conn
+                    .send(Pdu::SendPaste(SendPaste {
+                        pane_id: pane_id as PaneId,
+                        data: text,
                     }))
                     .map(|_| ())
                     .map_err(|e| format!("{:#}", e));

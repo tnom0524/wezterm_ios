@@ -91,6 +91,33 @@ xcrun devicectl device install app --device <device-id> \
 
 First launch: Settings → General → VPN & Device Management → trust your developer app.
 
+## Weekly routine: re-sign after the 7-day expiry (free account)
+
+With a free Apple ID the signature dies every 7 days — the app stops launching (or
+shows "Untrusted Developer"). The fix is a rebuild + reinstall; **app data (saved
+connections, snippets) survives**.
+
+```bash
+# 1. rebuild (incremental; build-rust.sh NOT needed unless Rust changed)
+cd ios
+xcodebuild -project WeztermMobile.xcodeproj -scheme WeztermMobile \
+  -configuration Release \
+  -destination 'platform=iOS,id=<device-udid>' \
+  DEVELOPMENT_TEAM=<team-id> -allowProvisioningUpdates \
+  -derivedDataPath /tmp/wezterm-device-build build
+
+# 2. install — no cable needed if the device shows "available (paired)":
+xcrun devicectl list devices
+xcrun devicectl device install app --device <device-id> \
+  /tmp/wezterm-device-build/Build/Products/Release-iphoneos/WeztermMobile.app
+```
+
+- **No cable needed** once paired: `devicectl` installs over the same Wi-Fi.
+  Plug in only if the device shows as unavailable.
+- After re-signing, iOS sometimes drops developer trust again. If launch is blocked:
+  Settings → General → VPN & Device Management → your developer profile → Trust
+  (the Trust button needs network connectivity).
+
 ## When do I need to rebuild?
 
 | Change | Rebuild? |

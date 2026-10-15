@@ -1,6 +1,6 @@
 name: WeztermMobile
 options:
-  bundleIdPrefix: com.example
+  bundleIdPrefix: dev.nyaga
   deploymentTarget:
     iOS: "18.0"
   xcodeVersion: "16.0"
@@ -27,8 +27,9 @@ targets:
           - "Generated/wezterm_ios_coreFFI.modulemap"
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.example.weztermmobile
+        PRODUCT_BUNDLE_IDENTIFIER: dev.nyaga.weztermmobile
         PRODUCT_NAME: WeztermMobile
+        TARGETED_DEVICE_FAMILY: "1,2"
         INFOPLIST_FILE: WeztermMobile/Info.plist
         OTHER_LDFLAGS: "-lc++"
         # Automatic signing — set DEVELOPMENT_TEAM once Apple ID is registered.

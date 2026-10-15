@@ -44,6 +44,14 @@ final class TerminalKeyView: UIView, UITextInput {
     /// 変換中テキストが変化したとき呼ばれる（nil = 変換終了）
     var onMarkedTextChanged: ((String?) -> Void)?
 
+    /// ハードウェアキーボード Cmd+V で呼ばれる（extension から参照）
+    var onPasteRequested: (() -> Void)?
+    /// ハードウェアキーボード Cmd+C で呼ばれる（extension から参照）
+    var onCopyRequested: (() -> Void)?
+
+    /// IME 変換中かどうか（extension から参照するための read-only computed property）
+    var isComposing: Bool { markedText != nil }
+
     override var canBecomeFirstResponder: Bool { true }
 
     // MARK: - Internal document state
@@ -314,6 +322,62 @@ final class TerminalKeyView: UIView, UITextInput {
         inputDelegate?.selectionDidChange(self)
     }
 
+    // MARK: - Floating cursor (スペースキー長押しのトラックパッドモード)
+
+    /// トラックパッドモード開始時の基準点
+    private var floatingOrigin: CGPoint? = nil
+    /// 送信済み水平ステップ数（右が正）
+    private var floatingSentX = 0
+    /// 送信済み垂直ステップ数（下が正）
+    private var floatingSentY = 0
+    /// 1矢印あたりの水平移動量(pt)
+    private let floatingStepX: CGFloat = 10
+    /// 1矢印あたりの垂直移動量(pt)
+    private let floatingStepY: CGFloat = 20
+
+    func beginFloatingCursor(at point: CGPoint) {
+        floatingOrigin = point
+        floatingSentX = 0
+        floatingSentY = 0
+    }
+
+    func updateFloatingCursor(at point: CGPoint) {
+        guard let origin = floatingOrigin else { return }
+        // IME変換中はトラックパッドによるカーソル移動を無効化する
+        guard markedText == nil else { return }
+
+        let dx = point.x - origin.x
+        let dy = point.y - origin.y
+        let targetX = Int(dx / floatingStepX)
+        let targetY = Int(dy / floatingStepY)
+
+        // 水平方向: 右矢印 (ESC [ C) / 左矢印 (ESC [ D)
+        while floatingSentX < targetX {
+            onText?(Data([0x1B, 0x5B, 0x43]))   // 右矢印
+            floatingSentX += 1
+        }
+        while floatingSentX > targetX {
+            onText?(Data([0x1B, 0x5B, 0x44]))   // 左矢印
+            floatingSentX -= 1
+        }
+
+        // 垂直方向: 下矢印 (ESC [ B) / 上矢印 (ESC [ A)
+        while floatingSentY < targetY {
+            onText?(Data([0x1B, 0x5B, 0x42]))   // 下矢印
+            floatingSentY += 1
+        }
+        while floatingSentY > targetY {
+            onText?(Data([0x1B, 0x5B, 0x41]))   // 上矢印
+            floatingSentY -= 1
+        }
+    }
+
+    func endFloatingCursor() {
+        floatingOrigin = nil
+        floatingSentX = 0
+        floatingSentY = 0
+    }
+
     // MARK: - First responder tracking
 
     override func becomeFirstResponder() -> Bool {
@@ -336,6 +400,7 @@ struct TerminalKeyInput: UIViewRepresentable {
     @Binding var ctrlMode: Bool
     @Binding var isFocused: Bool
     @Binding var composingText: String?
+    var onCopyRequest: () -> Void = {}
 
     func makeUIView(context: Context) -> TerminalKeyView {
         let v = TerminalKeyView()
@@ -363,6 +428,14 @@ struct TerminalKeyInput: UIViewRepresentable {
                 composingText = text
             }
         }
+        uiView.onPasteRequested = { [weak store] in
+            if let s = UIPasteboard.general.string, !s.isEmpty {
+                store?.sendPaste(text: s)
+            }
+        }
+        uiView.onCopyRequested = {
+            onCopyRequest()
+        }
         // フォーカス状態を first responder に反映（main.async で更新サイクル外に）
         if isFocused && !uiView.isFirstResponder {
             DispatchQueue.main.async {
@@ -384,6 +457,11 @@ struct KeyInputView: View {
     @State private var ctrlMode = false
     @Binding var isKeyboardShown: Bool
     @Binding var composingText: String?
+    var onCopyRequest: () -> Void = {}
+
+    // スニペット機能
+    @StateObject private var snippetStore = SnippetStore()
+    @State private var showSnippetEditor = false
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -401,6 +479,43 @@ struct KeyInputView: View {
                 accessoryButton(label: "→") { sendBytes([0x1B, 0x5B, 0x43]) }
                 accessoryButton(label: "^C") { sendBytes([0x03]) }
 
+                // クリップボード貼り付けボタン
+                Button(action: {
+                    if let s = UIPasteboard.general.string, !s.isEmpty {
+                        store.sendPaste(text: s)
+                    }
+                }) {
+                    Image(systemName: "doc.on.clipboard")
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .background(Color(white: 0.3))
+                        .cornerRadius(5)
+                }
+                .padding(.horizontal, 2)
+
+                // スニペットメニューボタン
+                Menu {
+                    ForEach(snippetStore.snippets) { snippet in
+                        Button(snippet.label) {
+                            // スニペットテキストを UTF-8 で送信し、末尾に Enter (0x0D) を付加
+                            store.sendInput(data: Data(Array(snippet.text.utf8) + [0x0D]))
+                        }
+                    }
+                    Divider()
+                    Button("スニペットを編集…") {
+                        showSnippetEditor = true
+                    }
+                } label: {
+                    Image(systemName: "text.badge.star")
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .background(Color(white: 0.3))
+                        .cornerRadius(5)
+                }
+                .padding(.horizontal, 2)
+
                 Spacer()
 
                 Button(action: toggleKeyboard) {
@@ -415,7 +530,8 @@ struct KeyInputView: View {
                 TerminalKeyInput(store: store,
                                  ctrlMode: $ctrlMode,
                                  isFocused: $isKeyboardShown,
-                                 composingText: $composingText)
+                                 composingText: $composingText,
+                                 onCopyRequest: onCopyRequest)
                     .frame(width: 1, height: 1)
                     .allowsHitTesting(false)
             }
@@ -424,6 +540,10 @@ struct KeyInputView: View {
             if let composing = composingText, !composing.isEmpty {
                 composingStrip(text: composing)
             }
+        }
+        // スニペット編集シート
+        .sheet(isPresented: $showSnippetEditor) {
+            SnippetEditorView(store: snippetStore)
         }
     }
 
