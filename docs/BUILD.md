@@ -123,6 +123,21 @@ xcrun devicectl device install app --device <device-id> \
 
 - **No cable needed** once paired: `devicectl` installs over the same Wi-Fi.
   Plug in only if the device shows as unavailable.
+- **Signing needs a GUI login session.** Run the `xcodebuild` step from Terminal.app
+  (or any shell inside your logged-in desktop session). From ssh, a launchd
+  background job, or an agent shell, the login keychain is locked and codesign fails
+  with `User interaction is not allowed`.
+- **If `devicectl` never pairs the device** (it lists only an ECID, no UDID, and
+  `devicectl manage pair` reports no `RemotePairingDeviceRepresentation`), install
+  over USB through the lockdown channel instead; this works even when Xcode's
+  CoreDevice pairing is incomplete:
+
+  ```bash
+  brew install libimobiledevice ideviceinstaller
+  idevicepair pair        # tap "Trust" on the phone
+  ideviceinstaller install \
+    /tmp/wezterm-device-build/Build/Products/Release-iphoneos/WeztermMobile.app
+  ```
 - After re-signing, iOS sometimes drops developer trust again. If launch is blocked:
   Settings → General → VPN & Device Management → your developer profile → Trust
   (the Trust button needs network connectivity).
