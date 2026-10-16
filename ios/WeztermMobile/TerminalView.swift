@@ -71,6 +71,8 @@ private func buildPlainText(snap: Snapshot, store: ConnectionStore) -> String {
 struct TerminalView: View {
     @ObservedObject var store: ConnectionStore
     let pane: PaneInfo
+    /// ツールバーの「＋」から新しいペインを作ったときに呼ばれる（親が attach・画面切替を行う）
+    var onPaneCreated: ((PaneInfo) -> Void)? = nil
     @State private var isKeyboardShown = false
 
     // MARK: Resize state
@@ -148,6 +150,18 @@ struct TerminalView: View {
         .navigationTitle("Pane \(pane.paneId)")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            // 新しいペイン（このペインを分割 / 同じウィンドウに新しいタブ）
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Menu {
+                    PaneCreateMenuItems(store: store,
+                                        splitTarget: pane,
+                                        sameWindowAs: pane,
+                                        onCreated: { onPaneCreated?($0) })
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .disabled(!store.isConnected)
+            }
             // コピーシートを開くボタン（ペインタイトルの左に配置）
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button {
@@ -158,10 +172,16 @@ struct TerminalView: View {
                 }
             }
             ToolbarItem(placement: .navigationBarTrailing) {
-                Text(pane.title)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    // 所属タブの色ドット（ペイン一覧の色分けと対応）
+                    Circle()
+                        .fill(store.panes.tabColor(for: pane))
+                        .frame(width: 8, height: 8)
+                    Text(pane.title)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
             }
         }
         .sheet(item: $copyPayload) { payload in

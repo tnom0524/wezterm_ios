@@ -60,38 +60,54 @@ struct PadSidebarView: View {
             // MARK: ペインセクション（接続中 or 切断直後に表示）
             // 注意: サーバー切断時は handleDisconnected が isConnected=false にするため、
             // disconnectReason も条件に含めないと再接続 UI が表示されない
-            if store.isConnected || store.disconnectReason != nil {
-                Section {
-                    if let reason = store.disconnectReason {
-                        // 切断バナー: 再接続ボタンをセクション内に表示
-                        HStack(spacing: 12) {
-                            Image(systemName: "wifi.slash")
-                                .foregroundColor(.red)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("切断されました")
-                                    .font(.subheadline.bold())
-                                Text(reason)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                    .lineLimit(2)
-                            }
-                            Spacer()
-                            Button("再接続") {
-                                Task { await store.reconnect(addr: connectedAddr) }
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
+            if let reason = store.disconnectReason {
+                Section("ペイン") {
+                    // 切断バナー: 再接続ボタンをセクション内に表示
+                    HStack(spacing: 12) {
+                        Image(systemName: "wifi.slash")
+                            .foregroundColor(.red)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("切断されました")
+                                .font(.subheadline.bold())
+                            Text(reason)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .lineLimit(2)
                         }
-                        .padding(.vertical, 4)
-                    } else {
-                        ForEach(store.panes, id: \.paneId) { pane in
-                            paneRow(pane)
+                        Spacer()
+                        Button("再接続") {
+                            Task { await store.reconnect(addr: connectedAddr) }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    }
+                    .padding(.vertical, 4)
+                }
+            } else if store.isConnected {
+                // タブごとのセクション（色分け）。新しいタブはツールバーの「＋」から。
+                let multiWindow = store.panes.windowSummaries().count > 1
+                ForEach(store.panes.groupedByTab()) { group in
+                    Section {
+                        ForEach(group.panes, id: \.paneId) { pane in
+                            paneRow(pane, color: group.color)
+                        }
+                    } header: {
+                        HStack {
+                            TabSectionHeader(group: group, showWindow: multiWindow)
+                            Spacer()
+                            // このタブのアクティブペインを分割 / 同じウィンドウに新しいタブ
+                            Menu {
+                                PaneCreateMenuItems(store: store,
+                                                    splitTarget: group.activePane,
+                                                    sameWindowAs: group.activePane,
+                                                    onCreated: openCreatedPane)
+                            } label: {
+                                Image(systemName: "plus.circle")
+                                    .font(.body)
+                                    .foregroundColor(group.color)
+                            }
                         }
                     }
-                } header: {
-                    Text("ペイン")
-                } footer: {
-                    EmptyView()
                 }
             }
         }
@@ -108,6 +124,17 @@ struct PadSidebarView: View {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button("Refresh") {
                         Task { await store.refreshPanes() }
+                    }
+                }
+                // 新しいタブ（ウィンドウが複数あれば追加先を選ぶ）。右端の「＋」は接続先追加。
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Menu {
+                        PaneCreateMenuItems(store: store,
+                                            splitTarget: nil,
+                                            sameWindowAs: nil,
+                                            onCreated: openCreatedPane)
+                    } label: {
+                        Image(systemName: "plus.rectangle.on.rectangle")
                     }
                 }
             }
@@ -186,17 +213,28 @@ struct PadSidebarView: View {
         }
     }
 
+    // MARK: - ペイン作成
+
+    /// 新規作成したペインへ attach して詳細ビューを切り替える。
+    private func openCreatedPane(_ pane: PaneInfo) {
+        Task {
+            await store.switchPane(to: pane)
+            selectedPane = pane
+        }
+    }
+
     // MARK: - ペイン行
 
     @ViewBuilder
-    private func paneRow(_ pane: PaneInfo) -> some View {
+    private func paneRow(_ pane: PaneInfo, color: Color) -> some View {
         Button {
             Task {
                 await store.switchPane(to: pane)
                 selectedPane = pane
             }
         } label: {
-            HStack {
+            HStack(spacing: 10) {
+                TabColorBar(color: color)
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
                         if pane.active {
@@ -226,5 +264,31 @@ struct PadSidebarView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        // 長押し / 右クリック: このペインを分割 / 同じウィンドウに新しいタブ
+        .contextMenu {
+            PaneCreateMenuItems(store: store,
+                                splitTarget: pane,
+                                sameWindowAs: pane,
+                                onCreated: openCreatedPane)
+        }
+        // 右スワイプ: 分割のショートカット
+        .swipeActions(edge: .leading, allowsFullSwipe: false) {
+            Button {
+                Task {
+                    if let p = await store.splitPane(pane, direction: .horizontal) { openCreatedPane(p) }
+                }
+            } label: {
+                Label("右に分割", systemImage: "rectangle.split.2x1")
+            }
+            .tint(color)
+            Button {
+                Task {
+                    if let p = await store.splitPane(pane, direction: .vertical) { openCreatedPane(p) }
+                }
+            } label: {
+                Label("下に分割", systemImage: "rectangle.split.1x2")
+            }
+            .tint(color.opacity(0.7))
+        }
     }
 }

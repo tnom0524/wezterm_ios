@@ -12,7 +12,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use wezterm_ios_core::{connect, ClientDelegate, Snapshot};
+use wezterm_ios_core::{connect, ClientDelegate, Snapshot, SplitDirection};
 
 // 接続先は環境変数で指定: WEZTERM_MUX_ADDR=100.x.y.z:17777
 fn addr() -> String {
@@ -89,7 +89,7 @@ fn run() -> anyhow::Result<()> {
     }
 
     println!("### spawn (workspace={})", WORKSPACE);
-    let spawned = client.spawn(WORKSPACE.to_string(), 80, 24)?;
+    let spawned = client.spawn(None, WORKSPACE.to_string(), 80, 24)?;
     println!("    spawned pane_id={} tab_id={}", spawned.pane_id, spawned.tab_id);
 
     // 万一に備え、後片付けは早期リターンでも走らせたいのでクロージャ化。
@@ -155,6 +155,38 @@ fn run() -> anyhow::Result<()> {
         }
     }
 
+    // --- split_pane 検証: 自分のペインを上下分割し、同じタブに新ペインが増えることを確認 ---
+    println!("### split_pane pane_id={} direction=Vertical", spawned.pane_id);
+    let mut split_ok = false;
+    match client.split_pane(spawned.pane_id, SplitDirection::Vertical) {
+        Ok(split) => {
+            println!(
+                "    split pane_id={} tab_id={} window_id={}",
+                split.pane_id, split.tab_id, split.window_id
+            );
+            let panes = client.list_panes()?;
+            let orig = panes.iter().find(|p| p.pane_id == spawned.pane_id);
+            let new = panes.iter().find(|p| p.pane_id == split.pane_id);
+            match (orig, new) {
+                (Some(o), Some(n)) => {
+                    split_ok = split.tab_id == spawned.tab_id
+                        && n.tab_id == o.tab_id
+                        && n.tab_index == o.tab_index
+                        && n.workspace == WORKSPACE;
+                    println!(
+                        "    list_panes: orig(tab={} idx={} title={:?}) new(tab={} idx={} title={:?}) -> {}",
+                        o.tab_id, o.tab_index, o.tab_title, n.tab_id, n.tab_index, n.tab_title,
+                        if split_ok { "OK" } else { "MISMATCH" }
+                    );
+                }
+                _ => eprintln!("    list_panes に分割前後のペインが見つかりません"),
+            }
+            println!("### kill split pane_id={}", split.pane_id);
+            cleanup(&client, split.pane_id);
+        }
+        Err(e) => eprintln!("    split_pane エラー: {}", e),
+    }
+
     // --- 後片付け: 自分のペインを kill ---
     println!("### kill pane_id={}", spawned.pane_id);
     cleanup(&client, spawned.pane_id);
@@ -197,6 +229,7 @@ fn run() -> anyhow::Result<()> {
         "fetch_lines の結果に '{}' が含まれませんでした",
         MARKER
     );
+    anyhow::ensure!(split_ok, "split_pane の検証に失敗しました");
 
     println!("SMOKE OK");
     Ok(())

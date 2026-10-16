@@ -287,6 +287,11 @@ void uniffi_wezterm_ios_core_fn_method_muxclient_attach(uint64_t ptr, uint64_t p
 void uniffi_wezterm_ios_core_fn_method_muxclient_disconnect(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WEZTERM_IOS_CORE_FN_METHOD_MUXCLIENT_FETCH_LINES
+#define UNIFFI_FFIDEF_UNIFFI_WEZTERM_IOS_CORE_FN_METHOD_MUXCLIENT_FETCH_LINES
+RustBuffer uniffi_wezterm_ios_core_fn_method_muxclient_fetch_lines(uint64_t ptr, uint64_t pane_id, int64_t first_row, uint32_t count, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WEZTERM_IOS_CORE_FN_METHOD_MUXCLIENT_KILL
 #define UNIFFI_FFIDEF_UNIFFI_WEZTERM_IOS_CORE_FN_METHOD_MUXCLIENT_KILL
 void uniffi_wezterm_ios_core_fn_method_muxclient_kill(uint64_t ptr, uint64_t pane_id, RustCallStatus *_Nonnull out_status
@@ -307,9 +312,19 @@ void uniffi_wezterm_ios_core_fn_method_muxclient_resize(uint64_t ptr, uint64_t p
 void uniffi_wezterm_ios_core_fn_method_muxclient_send_input(uint64_t ptr, uint64_t pane_id, RustBuffer data, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WEZTERM_IOS_CORE_FN_METHOD_MUXCLIENT_SEND_PASTE
+#define UNIFFI_FFIDEF_UNIFFI_WEZTERM_IOS_CORE_FN_METHOD_MUXCLIENT_SEND_PASTE
+void uniffi_wezterm_ios_core_fn_method_muxclient_send_paste(uint64_t ptr, uint64_t pane_id, RustBuffer text, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WEZTERM_IOS_CORE_FN_METHOD_MUXCLIENT_SPAWN
 #define UNIFFI_FFIDEF_UNIFFI_WEZTERM_IOS_CORE_FN_METHOD_MUXCLIENT_SPAWN
-RustBuffer uniffi_wezterm_ios_core_fn_method_muxclient_spawn(uint64_t ptr, RustBuffer workspace, uint32_t cols, uint32_t rows, RustCallStatus *_Nonnull out_status
+RustBuffer uniffi_wezterm_ios_core_fn_method_muxclient_spawn(uint64_t ptr, RustBuffer window_id, RustBuffer workspace, uint32_t cols, uint32_t rows, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WEZTERM_IOS_CORE_FN_METHOD_MUXCLIENT_SPLIT_PANE
+#define UNIFFI_FFIDEF_UNIFFI_WEZTERM_IOS_CORE_FN_METHOD_MUXCLIENT_SPLIT_PANE
+RustBuffer uniffi_wezterm_ios_core_fn_method_muxclient_split_pane(uint64_t ptr, uint64_t pane_id, RustBuffer direction, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WEZTERM_IOS_CORE_FN_INIT_CALLBACK_VTABLE_CLIENTDELEGATE
@@ -600,6 +615,12 @@ uint16_t uniffi_wezterm_ios_core_checksum_method_muxclient_disconnect(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WEZTERM_IOS_CORE_CHECKSUM_METHOD_MUXCLIENT_FETCH_LINES
+#define UNIFFI_FFIDEF_UNIFFI_WEZTERM_IOS_CORE_CHECKSUM_METHOD_MUXCLIENT_FETCH_LINES
+uint16_t uniffi_wezterm_ios_core_checksum_method_muxclient_fetch_lines(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WEZTERM_IOS_CORE_CHECKSUM_METHOD_MUXCLIENT_KILL
 #define UNIFFI_FFIDEF_UNIFFI_WEZTERM_IOS_CORE_CHECKSUM_METHOD_MUXCLIENT_KILL
 uint16_t uniffi_wezterm_ios_core_checksum_method_muxclient_kill(void
@@ -624,9 +645,21 @@ uint16_t uniffi_wezterm_ios_core_checksum_method_muxclient_send_input(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WEZTERM_IOS_CORE_CHECKSUM_METHOD_MUXCLIENT_SEND_PASTE
+#define UNIFFI_FFIDEF_UNIFFI_WEZTERM_IOS_CORE_CHECKSUM_METHOD_MUXCLIENT_SEND_PASTE
+uint16_t uniffi_wezterm_ios_core_checksum_method_muxclient_send_paste(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_WEZTERM_IOS_CORE_CHECKSUM_METHOD_MUXCLIENT_SPAWN
 #define UNIFFI_FFIDEF_UNIFFI_WEZTERM_IOS_CORE_CHECKSUM_METHOD_MUXCLIENT_SPAWN
 uint16_t uniffi_wezterm_ios_core_checksum_method_muxclient_spawn(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_WEZTERM_IOS_CORE_CHECKSUM_METHOD_MUXCLIENT_SPLIT_PANE
+#define UNIFFI_FFIDEF_UNIFFI_WEZTERM_IOS_CORE_CHECKSUM_METHOD_MUXCLIENT_SPLIT_PANE
+uint16_t uniffi_wezterm_ios_core_checksum_method_muxclient_split_pane(void
     
 );
 #endif

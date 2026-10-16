@@ -133,6 +133,73 @@ final class ConnectionStore: ObservableObject {
         }
     }
 
+    // MARK: - Pane creation
+
+    /// 新しいタブ（＝新規ペイン）を作る。windowId が nil なら新規ウィンドウ。
+    /// 成功したら一覧を更新し、新ペインの PaneInfo を返す（呼び出し側で attach する）。
+    func newTab(windowId: UInt64?, workspace: String) async -> PaneInfo? {
+        guard let c = client else { return nil }
+        let (cols, rows) = preferredSpawnSize()
+        let result = await Task.detached(priority: .userInitiated) {
+            return Result { try c.spawn(windowId: windowId, workspace: workspace, cols: cols, rows: rows) }
+        }.value
+        return await finishCreate(result)
+    }
+
+    /// 既存ペインを分割して新しいペインを作る。
+    /// 成功したら一覧を更新し、新ペインの PaneInfo を返す（呼び出し側で attach する）。
+    func splitPane(_ pane: PaneInfo, direction: SplitDirection) async -> PaneInfo? {
+        guard let c = client else { return nil }
+        let pid = pane.paneId
+        let result = await Task.detached(priority: .userInitiated) {
+            return Result { try c.splitPane(paneId: pid, direction: direction) }
+        }.value
+        return await finishCreate(result)
+    }
+
+    /// 起動引数による自動ペイン作成（自動テスト用。既存の --autoattach / --attach-pane と同じ仕組み）。
+    ///   --split-pane <paneId> <right|down>  指定ペインを分割
+    ///   --new-tab                           最初のウィンドウに新しいタブを作る
+    /// 接続済みで一覧取得後に呼ぶ。作成した新ペインを返す（引数が無ければ nil）。
+    func runLaunchArgumentPaneCreation() async -> PaneInfo? {
+        let args = ProcessInfo.processInfo.arguments
+        if let idx = args.firstIndex(of: "--split-pane"), idx + 2 < args.count,
+           let pid = UInt64(args[idx + 1]),
+           let target = panes.first(where: { $0.paneId == pid }) {
+            let direction: SplitDirection = args[idx + 2] == "down" ? .vertical : .horizontal
+            return await splitPane(target, direction: direction)
+        }
+        if args.contains("--new-tab") {
+            let win = panes.windowSummaries().first
+            return await newTab(windowId: win?.windowId, workspace: win?.workspace ?? "default")
+        }
+        return nil
+    }
+
+    /// spawn / split の結果を受けてペイン一覧を再取得し、新ペインを探して返す。
+    private func finishCreate(_ result: Result<SpawnInfo, Error>) async -> PaneInfo? {
+        switch result {
+        case .success(let info):
+            await refreshPanes()
+            if let found = panes.first(where: { $0.paneId == info.paneId }) {
+                return found
+            }
+            errorMessage = "新しいペイン (id=\(info.paneId)) が一覧に見つかりませんでした"
+            return nil
+        case .failure(let e):
+            errorMessage = e.localizedDescription
+            return nil
+        }
+    }
+
+    /// 新規タブの初期サイズ。attach 中のペインがあればその画面サイズ、無ければ 80x24。
+    private func preferredSpawnSize() -> (UInt32, UInt32) {
+        if let snap = snapshot, snap.cols > 0, snap.viewRows > 0 {
+            return (snap.cols, snap.viewRows)
+        }
+        return (80, 24)
+    }
+
     /// ペインをリサイズする。結果は次の Snapshot に新寸法で反映される。
     func resize(paneId: UInt64, tabId: UInt64, cols: UInt32, rows: UInt32) {
         guard let c = client else { return }

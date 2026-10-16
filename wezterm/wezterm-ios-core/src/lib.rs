@@ -1,7 +1,7 @@
 //! wezterm mux の iOS クライアント向け Rust コア。
 //!
 //! poc-attach v1 の Transport / Conn / PaneState を土台に、DESIGN-ios.md の
-//! API（connect / list_panes / attach / send_input / resize / disconnect +
+//! API（connect / list_panes / attach / send_input / resize / spawn / split_pane / disconnect +
 //! ClientDelegate コールバック + Snapshot 型）を UniFFI(proc-macro) で公開する。
 //!
 //! スレッドモデル:
@@ -22,11 +22,12 @@ use crate::transport::{TcpTransport, Transport};
 use anyhow::Context as _;
 use codec::{
     GetCodecVersion, GetLines, GetPaneRenderChanges, KillPane, ListPanes, Pdu, Resize, SendPaste,
-    SetClientId, SpawnV2, WriteToPane, CODEC_VERSION,
+    SetClientId, SpawnV2, SplitPane, WriteToPane, CODEC_VERSION,
 };
+use config::keyassignment::SpawnTabDomain;
 use mux::client::ClientId;
 use mux::pane::PaneId;
-use mux::tab::{PaneEntry, PaneNode};
+use mux::tab::{PaneEntry, PaneNode, SplitDirection as MuxSplitDirection, SplitRequest, SplitSize};
 use std::collections::HashMap;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
@@ -51,13 +52,30 @@ pub struct PaneInfo {
     pub cols: u32,
     pub rows: u32,
     pub workspace: String,
+    /// ListPanes 応答におけるタブの並び順（0 始まり、ウィンドウ横断の通し番号）。
+    /// GUI 側のタブ順と一致するので、UI でのタブ番号・色分けに使う。
+    pub tab_index: u32,
+    /// タブのタイトル（サーバー側で未設定なら空文字）。
+    pub tab_title: String,
+    /// ウィンドウのタイトル（未設定なら空文字）。
+    pub window_title: String,
 }
 
-/// SpawnV2 の結果。
+/// SpawnV2 / SplitPane の結果。
 #[derive(uniffi::Record, Clone, Debug)]
 pub struct SpawnInfo {
     pub pane_id: u64,
     pub tab_id: u64,
+    pub window_id: u64,
+}
+
+/// ペイン分割の方向。wezterm 本家の SplitDirection と同じ意味。
+#[derive(uniffi::Enum, Clone, Copy, Debug)]
+pub enum SplitDirection {
+    /// 左右に並べる（新ペインは右側）。
+    Horizontal,
+    /// 上下に並べる（新ペインは下側）。
+    Vertical,
 }
 
 /// 画面スナップショット（フル viewport、色は Rust 側で解決済み）。
@@ -144,9 +162,15 @@ pub(crate) enum Command {
         reply: Reply<()>,
     },
     Spawn {
+        window_id: Option<u64>,
         workspace: String,
         cols: u32,
         rows: u32,
+        reply: Reply<SpawnInfo>,
+    },
+    Split {
+        pane_id: u64,
+        direction: SplitDirection,
         reply: Reply<SpawnInfo>,
     },
     Kill {
@@ -242,17 +266,34 @@ impl MuxClient {
         })
     }
 
-    /// 隔離用に新規ペインをスポーンする（スモーク/将来のiOS新規タブ用）。
+    /// 新しいタブ（＝新規ペイン）をスポーンする（SpawnV2）。
+    /// window_id を指定すると既存ウィンドウにタブを追加し、None なら新規ウィンドウを作る。
     pub fn spawn(
         &self,
+        window_id: Option<u64>,
         workspace: String,
         cols: u32,
         rows: u32,
     ) -> Result<SpawnInfo, IosCoreError> {
         self.dispatch(|reply| Command::Spawn {
+            window_id,
             workspace,
             cols,
             rows,
+            reply,
+        })
+    }
+
+    /// 既存ペインを分割して新規ペインを作る（SplitPane）。
+    /// 新ペインは分割元と同じドメインで、分割元の半分のサイズになる。
+    pub fn split_pane(
+        &self,
+        pane_id: u64,
+        direction: SplitDirection,
+    ) -> Result<SpawnInfo, IosCoreError> {
+        self.dispatch(|reply| Command::Split {
+            pane_id,
+            direction,
             reply,
         })
     }
@@ -450,13 +491,24 @@ impl Engine {
                 let _ = reply.send(res);
             }
             Command::Spawn {
+                window_id,
                 workspace,
                 cols,
                 rows,
                 reply,
             } => {
                 let _ = reply.send(
-                    self.do_spawn(workspace, cols, rows)
+                    self.do_spawn(window_id, workspace, cols, rows)
+                        .map_err(|e| format!("{:#}", e)),
+                );
+            }
+            Command::Split {
+                pane_id,
+                direction,
+                reply,
+            } => {
+                let _ = reply.send(
+                    self.do_split(pane_id as PaneId, direction)
                         .map_err(|e| format!("{:#}", e)),
                 );
             }
@@ -492,15 +544,21 @@ impl Engine {
         let leaves = self.query_leaves()?;
         Ok(leaves
             .iter()
-            .map(|e| PaneInfo {
-                pane_id: e.pane_id as u64,
-                tab_id: e.tab_id as u64,
-                window_id: e.window_id as u64,
-                title: e.title.clone(),
-                active: e.is_active_pane,
-                cols: e.size.cols as u32,
-                rows: e.size.rows as u32,
-                workspace: e.workspace.clone(),
+            .map(|l| {
+                let e = &l.entry;
+                PaneInfo {
+                    pane_id: e.pane_id as u64,
+                    tab_id: e.tab_id as u64,
+                    window_id: e.window_id as u64,
+                    title: e.title.clone(),
+                    active: e.is_active_pane,
+                    cols: e.size.cols as u32,
+                    rows: e.size.rows as u32,
+                    workspace: e.workspace.clone(),
+                    tab_index: l.tab_index,
+                    tab_title: l.tab_title.clone(),
+                    window_title: l.window_title.clone(),
+                }
             })
             .collect())
     }
@@ -510,8 +568,8 @@ impl Engine {
         let leaves = self.query_leaves()?;
         let tab_id = leaves
             .iter()
-            .find(|e| e.pane_id == pid)
-            .map(|e| e.tab_id)
+            .find(|l| l.entry.pane_id == pid)
+            .map(|l| l.entry.tab_id)
             .with_context(|| format!("pane_id={} が見つかりません", pid))?;
 
         self.conn.rpc(Pdu::Resize(Resize {
@@ -536,10 +594,16 @@ impl Engine {
         Ok(())
     }
 
-    fn do_spawn(&mut self, workspace: String, cols: u32, rows: u32) -> anyhow::Result<SpawnInfo> {
+    fn do_spawn(
+        &mut self,
+        window_id: Option<u64>,
+        workspace: String,
+        cols: u32,
+        rows: u32,
+    ) -> anyhow::Result<SpawnInfo> {
         let resp = self.conn.rpc(Pdu::SpawnV2(SpawnV2 {
-            domain: config::keyassignment::SpawnTabDomain::DefaultDomain,
-            window_id: None,
+            domain: SpawnTabDomain::DefaultDomain,
+            window_id: window_id.map(|w| w as usize),
             command: None,
             command_dir: None,
             size: term_size(cols, rows),
@@ -549,8 +613,38 @@ impl Engine {
             Pdu::SpawnResponse(r) => Ok(SpawnInfo {
                 pane_id: r.pane_id as u64,
                 tab_id: r.tab_id as u64,
+                window_id: r.window_id as u64,
             }),
             other => anyhow::bail!("SpawnV2への予期しない応答: {}", other.pdu_name()),
+        }
+    }
+
+    fn do_split(&mut self, pid: PaneId, direction: SplitDirection) -> anyhow::Result<SpawnInfo> {
+        let resp = self.conn.rpc(Pdu::SplitPane(SplitPane {
+            pane_id: pid,
+            split_request: SplitRequest {
+                direction: match direction {
+                    SplitDirection::Horizontal => MuxSplitDirection::Horizontal,
+                    SplitDirection::Vertical => MuxSplitDirection::Vertical,
+                },
+                // 新ペインは右/下側に置く（本家のデフォルトと同じ）
+                target_is_second: true,
+                top_level: false,
+                size: SplitSize::Percent(50),
+            },
+            command: None,
+            command_dir: None,
+            // 分割元ペインと同じドメインで起動する
+            domain: SpawnTabDomain::CurrentPaneDomain,
+            move_pane_id: None,
+        }))?;
+        match resp {
+            Pdu::SpawnResponse(r) => Ok(SpawnInfo {
+                pane_id: r.pane_id as u64,
+                tab_id: r.tab_id as u64,
+                window_id: r.window_id as u64,
+            }),
+            other => anyhow::bail!("SplitPaneへの予期しない応答: {}", other.pdu_name()),
         }
     }
 
@@ -587,13 +681,31 @@ impl Engine {
         }
     }
 
-    fn query_leaves(&mut self) -> anyhow::Result<Vec<PaneEntry>> {
+    /// ListPanes を発行し、ペインツリーをリーフ（ペイン）に展開して返す。
+    /// 各リーフには所属タブの並び順・タイトル、ウィンドウタイトルを添える。
+    fn query_leaves(&mut self) -> anyhow::Result<Vec<Leaf>> {
         let resp = self.conn.rpc(Pdu::ListPanes(ListPanes {}))?;
         match resp {
             Pdu::ListPanesResponse(r) => {
                 let mut leaves = Vec::new();
-                for tab in &r.tabs {
-                    collect_leaves(tab, &mut leaves);
+                for (tab_index, tab) in r.tabs.iter().enumerate() {
+                    let mut entries = Vec::new();
+                    collect_leaves(tab, &mut entries);
+                    // tab_titles は tabs と同じ順序・同じ長さ（本家クライアントと同じ前提）
+                    let tab_title = r.tab_titles.get(tab_index).cloned().unwrap_or_default();
+                    for entry in entries {
+                        let window_title = r
+                            .window_titles
+                            .get(&entry.window_id)
+                            .cloned()
+                            .unwrap_or_default();
+                        leaves.push(Leaf {
+                            entry,
+                            tab_index: tab_index as u32,
+                            tab_title: tab_title.clone(),
+                            window_title,
+                        });
+                    }
                 }
                 Ok(leaves)
             }
@@ -608,6 +720,14 @@ impl Engine {
             self.delegate.on_snapshot(pid as u64, snap);
         }
     }
+}
+
+/// ListPanes のリーフ（ペイン）＋所属タブ/ウィンドウのメタ情報。
+struct Leaf {
+    entry: PaneEntry,
+    tab_index: u32,
+    tab_title: String,
+    window_title: String,
 }
 
 fn collect_leaves(node: &PaneNode, out: &mut Vec<PaneEntry>) {

@@ -53,7 +53,16 @@ xcrun simctl launch booted com.example.weztermmobile
 ```
 
 The simulator shares the Mac's network — if the Mac's Tailscale is connected, the app
-can reach your tailnet directly. Simulator quirks (click-drag scrolling, hardware
+can reach your tailnet directly.
+
+Building with `-destination 'generic/platform=iOS Simulator'` (no concrete device) also
+tries to link an x86_64 slice, which the XCFramework does not contain; add
+`ARCHS=arm64 ONLY_ACTIVE_ARCH=YES` in that case.
+
+Launch arguments for automated checks (all require a saved connection):
+`--autoconnect` (connect to the first saved server), `--attach-pane <id>`,
+`--split-pane <id> right|down` (split that pane and open the new one) and `--new-tab`
+(new tab in the first window). Example: `xcrun simctl launch booted dev.nyaga.weztermmobile --autoconnect --split-pane 0 down`. Simulator quirks (click-drag scrolling, hardware
 keyboard capture) are covered in TROUBLESHOOTING.md.
 
 ## 4. Device build (signing required)

@@ -26,8 +26,13 @@ struct PadRootView: View {
                            connectedAddr: $connectedAddr)
         } detail: {
             if let pane = selectedPane {
-                TerminalView(store: store, pane: pane)
-                    .id(pane.paneId)   // 必須: ペイン固有 @State をビューごとリセット
+                TerminalView(store: store, pane: pane, onPaneCreated: { created in
+                    Task {
+                        await store.switchPane(to: created)
+                        selectedPane = created
+                    }
+                })
+                .id(pane.paneId)   // 必須: ペイン固有 @State をビューごとリセット
             } else {
                 ContentUnavailableView("ペインを選択",
                                        systemImage: "terminal",
@@ -40,7 +45,10 @@ struct PadRootView: View {
                 Task {
                     connectedAddr = first.addr
                     await store.makeConnection(addr: first.addr)
-                    if let pid = attachPaneId, let target = store.panes.first(where: { $0.paneId == pid }) {
+                    if let created = await store.runLaunchArgumentPaneCreation() {
+                        await store.switchPane(to: created)
+                        selectedPane = created
+                    } else if let pid = attachPaneId, let target = store.panes.first(where: { $0.paneId == pid }) {
                         await store.switchPane(to: target)
                         selectedPane = target
                     } else if let active = store.panes.first(where: { $0.active }) ?? store.panes.first {

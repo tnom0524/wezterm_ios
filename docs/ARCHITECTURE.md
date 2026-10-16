@@ -35,7 +35,7 @@ Key PDUs used by this client:
 | `GetLines` | fetch arbitrary `StableRowIndex` ranges (scrollback) |
 | `WriteToPane` | key/paste input |
 | `Resize` | reflow the pane to the phone's grid |
-| `SpawnV2` / `KillPane` | new panes (also used by the automated smoke test) |
+| `SpawnV2` / `SplitPane` / `KillPane` | new tabs / split panes from the app (also used by the automated smoke test) |
 
 Because the server pushes rendered *line data* (not a byte stream), the client needs no
 VT/escape parser — it is a true thin client.
@@ -63,7 +63,9 @@ Swift ◀─(delegate callbacks)── Snapshot/Row conversion ◀── PDU dec
   `mouse_grabbed` (see Scrolling below).
 - Public API (UniFFI proc-macro mode): `connect(addr, delegate)`,
   `list_panes`, `attach(pane, cols, rows)`, `send_input`, `resize`, `fetch_lines`,
-  `spawn`, `kill`, `disconnect`; delegate receives `on_snapshot` / `on_disconnected`.
+  `spawn(window_id, …)`, `split_pane(pane_id, direction)`, `kill`, `disconnect`; delegate
+  receives `on_snapshot` / `on_disconnected`. `PaneInfo` carries `tab_index` / `tab_title` /
+  `window_title` so the app can group panes by tab (color-coded sections).
 
 ### 4. iOS app: SwiftUI thin client
 

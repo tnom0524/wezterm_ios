@@ -535,6 +535,22 @@ fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterInt64: FfiConverterPrimitive {
+    typealias FfiType = Int64
+    typealias SwiftType = Int64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Int64 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Int64, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterBool : FfiConverter {
     typealias FfiType = Int8
     typealias SwiftType = Bool
@@ -636,6 +652,13 @@ public protocol MuxClientProtocol: AnyObject, Sendable {
     func disconnect() 
     
     /**
+     * スクロールバック履歴行を取得する（GetLines RPC）。
+     * first_row: 取得開始 StableRowIndex、count: 最大行数。
+     * 色解決済みの Row スライスを返す（不足行は空 Row）。
+     */
+    func fetchLines(paneId: UInt64, firstRow: Int64, count: UInt32) throws  -> [Row]
+    
+    /**
      * 指定ペインを kill する（自分でスポーンしたペインの後片付け用）。
      */
     func kill(paneId: UInt64) throws 
@@ -656,9 +679,22 @@ public protocol MuxClientProtocol: AnyObject, Sendable {
     func sendInput(paneId: UInt64, data: Data) throws 
     
     /**
-     * 隔離用に新規ペインをスポーンする（スモーク/将来のiOS新規タブ用）。
+     * クリップボード文字列をブラケットペーストとしてペインへ送る（SendPaste PDU）。
+     * サーバー側がブラケットペーストのエスケープを処理する。
      */
-    func spawn(workspace: String, cols: UInt32, rows: UInt32) throws  -> SpawnInfo
+    func sendPaste(paneId: UInt64, text: String) throws 
+    
+    /**
+     * 新しいタブ（＝新規ペイン）をスポーンする（SpawnV2）。
+     * window_id を指定すると既存ウィンドウにタブを追加し、None なら新規ウィンドウを作る。
+     */
+    func spawn(windowId: UInt64?, workspace: String, cols: UInt32, rows: UInt32) throws  -> SpawnInfo
+    
+    /**
+     * 既存ペインを分割して新規ペインを作る（SplitPane）。
+     * 新ペインは分割元と同じドメインで、分割元の半分のサイズになる。
+     */
+    func splitPane(paneId: UInt64, direction: SplitDirection) throws  -> SpawnInfo
     
 }
 open class MuxClient: MuxClientProtocol, @unchecked Sendable {
@@ -740,6 +776,23 @@ open func disconnect()  {try! rustCall() {
 }
     
     /**
+     * スクロールバック履歴行を取得する（GetLines RPC）。
+     * first_row: 取得開始 StableRowIndex、count: 最大行数。
+     * 色解決済みの Row スライスを返す（不足行は空 Row）。
+     */
+open func fetchLines(paneId: UInt64, firstRow: Int64, count: UInt32)throws  -> [Row]  {
+    return try  FfiConverterSequenceTypeRow.lift(try rustCallWithError(FfiConverterTypeIosCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_wezterm_ios_core_fn_method_muxclient_fetch_lines(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(paneId),
+        FfiConverterInt64.lower(firstRow),
+        FfiConverterUInt32.lower(count),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * 指定ペインを kill する（自分でスポーンしたペインの後片付け用）。
      */
 open func kill(paneId: UInt64)throws   {try rustCallWithError(FfiConverterTypeIosCoreError_lift) {
@@ -792,16 +845,47 @@ open func sendInput(paneId: UInt64, data: Data)throws   {try rustCallWithError(F
 }
     
     /**
-     * 隔離用に新規ペインをスポーンする（スモーク/将来のiOS新規タブ用）。
+     * クリップボード文字列をブラケットペーストとしてペインへ送る（SendPaste PDU）。
+     * サーバー側がブラケットペーストのエスケープを処理する。
      */
-open func spawn(workspace: String, cols: UInt32, rows: UInt32)throws  -> SpawnInfo  {
+open func sendPaste(paneId: UInt64, text: String)throws   {try rustCallWithError(FfiConverterTypeIosCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_wezterm_ios_core_fn_method_muxclient_send_paste(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(paneId),
+        FfiConverterString.lower(text),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * 新しいタブ（＝新規ペイン）をスポーンする（SpawnV2）。
+     * window_id を指定すると既存ウィンドウにタブを追加し、None なら新規ウィンドウを作る。
+     */
+open func spawn(windowId: UInt64?, workspace: String, cols: UInt32, rows: UInt32)throws  -> SpawnInfo  {
     return try  FfiConverterTypeSpawnInfo_lift(try rustCallWithError(FfiConverterTypeIosCoreError_lift) {
         uniffiCallStatus in
     uniffi_wezterm_ios_core_fn_method_muxclient_spawn(
             self.uniffiCloneHandle(),
+        FfiConverterOptionUInt64.lower(windowId),
         FfiConverterString.lower(workspace),
         FfiConverterUInt32.lower(cols),
         FfiConverterUInt32.lower(rows),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * 既存ペインを分割して新規ペインを作る（SplitPane）。
+     * 新ペインは分割元と同じドメインで、分割元の半分のサイズになる。
+     */
+open func splitPane(paneId: UInt64, direction: SplitDirection)throws  -> SpawnInfo  {
+    return try  FfiConverterTypeSpawnInfo_lift(try rustCallWithError(FfiConverterTypeIosCoreError_lift) {
+        uniffiCallStatus in
+    uniffi_wezterm_ios_core_fn_method_muxclient_split_pane(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(paneId),
+        FfiConverterTypeSplitDirection_lower(direction),uniffiCallStatus
     )
 })
 }
@@ -866,10 +950,33 @@ public struct PaneInfo: Equatable, Hashable {
     public var cols: UInt32
     public var rows: UInt32
     public var workspace: String
+    /**
+     * ListPanes 応答におけるタブの並び順（0 始まり、ウィンドウ横断の通し番号）。
+     * GUI 側のタブ順と一致するので、UI でのタブ番号・色分けに使う。
+     */
+    public var tabIndex: UInt32
+    /**
+     * タブのタイトル（サーバー側で未設定なら空文字）。
+     */
+    public var tabTitle: String
+    /**
+     * ウィンドウのタイトル（未設定なら空文字）。
+     */
+    public var windowTitle: String
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(paneId: UInt64, tabId: UInt64, windowId: UInt64, title: String, active: Bool, cols: UInt32, rows: UInt32, workspace: String) {
+    public init(paneId: UInt64, tabId: UInt64, windowId: UInt64, title: String, active: Bool, cols: UInt32, rows: UInt32, workspace: String, 
+        /**
+         * ListPanes 応答におけるタブの並び順（0 始まり、ウィンドウ横断の通し番号）。
+         * GUI 側のタブ順と一致するので、UI でのタブ番号・色分けに使う。
+         */tabIndex: UInt32, 
+        /**
+         * タブのタイトル（サーバー側で未設定なら空文字）。
+         */tabTitle: String, 
+        /**
+         * ウィンドウのタイトル（未設定なら空文字）。
+         */windowTitle: String) {
         self.paneId = paneId
         self.tabId = tabId
         self.windowId = windowId
@@ -878,6 +985,9 @@ public struct PaneInfo: Equatable, Hashable {
         self.cols = cols
         self.rows = rows
         self.workspace = workspace
+        self.tabIndex = tabIndex
+        self.tabTitle = tabTitle
+        self.windowTitle = windowTitle
     }
 
     
@@ -903,7 +1013,10 @@ public struct FfiConverterTypePaneInfo: FfiConverterRustBuffer {
                 active: FfiConverterBool.read(from: &buf), 
                 cols: FfiConverterUInt32.read(from: &buf), 
                 rows: FfiConverterUInt32.read(from: &buf), 
-                workspace: FfiConverterString.read(from: &buf)
+                workspace: FfiConverterString.read(from: &buf), 
+                tabIndex: FfiConverterUInt32.read(from: &buf), 
+                tabTitle: FfiConverterString.read(from: &buf), 
+                windowTitle: FfiConverterString.read(from: &buf)
         )
     }
 
@@ -916,6 +1029,9 @@ public struct FfiConverterTypePaneInfo: FfiConverterRustBuffer {
         FfiConverterUInt32.write(value.cols, into: &buf)
         FfiConverterUInt32.write(value.rows, into: &buf)
         FfiConverterString.write(value.workspace, into: &buf)
+        FfiConverterUInt32.write(value.tabIndex, into: &buf)
+        FfiConverterString.write(value.tabTitle, into: &buf)
+        FfiConverterString.write(value.windowTitle, into: &buf)
     }
 }
 
@@ -994,15 +1110,47 @@ public struct Snapshot: Equatable, Hashable {
     public var cursorCol: Int32
     public var cols: UInt32
     public var viewRows: UInt32
+    /**
+     * ライブビューポートの先頭行（StableRowIndex）。スクロールバック範囲の計算に使う。
+     */
+    public var physicalTop: Int64
+    /**
+     * スクロールバック内で取得可能な最古行（StableRowIndex）。
+     */
+    public var scrollbackTop: Int64
+    /**
+     * マウスが掴まれているか（アプリ側スクロール vs ターミナルへ転送の判定に使う）。
+     */
+    public var mouseGrabbed: Bool
+    /**
+     * カーソルが表示状態かどうか（false = Hidden, true = Visible）。
+     */
+    public var cursorVisible: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(rows: [Row], cursorRow: Int32, cursorCol: Int32, cols: UInt32, viewRows: UInt32) {
+    public init(rows: [Row], cursorRow: Int32, cursorCol: Int32, cols: UInt32, viewRows: UInt32, 
+        /**
+         * ライブビューポートの先頭行（StableRowIndex）。スクロールバック範囲の計算に使う。
+         */physicalTop: Int64, 
+        /**
+         * スクロールバック内で取得可能な最古行（StableRowIndex）。
+         */scrollbackTop: Int64, 
+        /**
+         * マウスが掴まれているか（アプリ側スクロール vs ターミナルへ転送の判定に使う）。
+         */mouseGrabbed: Bool, 
+        /**
+         * カーソルが表示状態かどうか（false = Hidden, true = Visible）。
+         */cursorVisible: Bool) {
         self.rows = rows
         self.cursorRow = cursorRow
         self.cursorCol = cursorCol
         self.cols = cols
         self.viewRows = viewRows
+        self.physicalTop = physicalTop
+        self.scrollbackTop = scrollbackTop
+        self.mouseGrabbed = mouseGrabbed
+        self.cursorVisible = cursorVisible
     }
 
     
@@ -1025,7 +1173,11 @@ public struct FfiConverterTypeSnapshot: FfiConverterRustBuffer {
                 cursorRow: FfiConverterInt32.read(from: &buf), 
                 cursorCol: FfiConverterInt32.read(from: &buf), 
                 cols: FfiConverterUInt32.read(from: &buf), 
-                viewRows: FfiConverterUInt32.read(from: &buf)
+                viewRows: FfiConverterUInt32.read(from: &buf), 
+                physicalTop: FfiConverterInt64.read(from: &buf), 
+                scrollbackTop: FfiConverterInt64.read(from: &buf), 
+                mouseGrabbed: FfiConverterBool.read(from: &buf), 
+                cursorVisible: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -1035,6 +1187,10 @@ public struct FfiConverterTypeSnapshot: FfiConverterRustBuffer {
         FfiConverterInt32.write(value.cursorCol, into: &buf)
         FfiConverterUInt32.write(value.cols, into: &buf)
         FfiConverterUInt32.write(value.viewRows, into: &buf)
+        FfiConverterInt64.write(value.physicalTop, into: &buf)
+        FfiConverterInt64.write(value.scrollbackTop, into: &buf)
+        FfiConverterBool.write(value.mouseGrabbed, into: &buf)
+        FfiConverterBool.write(value.cursorVisible, into: &buf)
     }
 }
 
@@ -1120,17 +1276,19 @@ public func FfiConverterTypeSpan_lower(_ value: Span) -> RustBuffer {
 
 
 /**
- * SpawnV2 の結果。
+ * SpawnV2 / SplitPane の結果。
  */
 public struct SpawnInfo: Equatable, Hashable {
     public var paneId: UInt64
     public var tabId: UInt64
+    public var windowId: UInt64
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(paneId: UInt64, tabId: UInt64) {
+    public init(paneId: UInt64, tabId: UInt64, windowId: UInt64) {
         self.paneId = paneId
         self.tabId = tabId
+        self.windowId = windowId
     }
 
     
@@ -1150,13 +1308,15 @@ public struct FfiConverterTypeSpawnInfo: FfiConverterRustBuffer {
         return
             try SpawnInfo(
                 paneId: FfiConverterUInt64.read(from: &buf), 
-                tabId: FfiConverterUInt64.read(from: &buf)
+                tabId: FfiConverterUInt64.read(from: &buf), 
+                windowId: FfiConverterUInt64.read(from: &buf)
         )
     }
 
     public static func write(_ value: SpawnInfo, into buf: inout [UInt8]) {
         FfiConverterUInt64.write(value.paneId, into: &buf)
         FfiConverterUInt64.write(value.tabId, into: &buf)
+        FfiConverterUInt64.write(value.windowId, into: &buf)
     }
 }
 
@@ -1249,6 +1409,81 @@ public func FfiConverterTypeIosCoreError_lift(_ buf: RustBuffer) throws -> IosCo
 public func FfiConverterTypeIosCoreError_lower(_ value: IosCoreError) -> RustBuffer {
     return FfiConverterTypeIosCoreError.lower(value)
 }
+
+
+/**
+ * ペイン分割の方向。wezterm 本家の SplitDirection と同じ意味。
+ */
+
+public enum SplitDirection: Equatable, Hashable {
+    
+    /**
+     * 左右に並べる（新ペインは右側）。
+     */
+    case horizontal
+    /**
+     * 上下に並べる（新ペインは下側）。
+     */
+    case vertical
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension SplitDirection: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSplitDirection: FfiConverterRustBuffer {
+    typealias SwiftType = SplitDirection
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SplitDirection {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .horizontal
+        
+        case 2: return .vertical
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: SplitDirection, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .horizontal:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .vertical:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSplitDirection_lift(_ buf: RustBuffer) throws -> SplitDirection {
+    return try FfiConverterTypeSplitDirection.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSplitDirection_lower(_ value: SplitDirection) -> RustBuffer {
+    return FfiConverterTypeSplitDirection.lower(value)
+}
+
 
 
 
@@ -1425,6 +1660,30 @@ public func FfiConverterCallbackInterfaceClientDelegate_lower(_ v: ClientDelegat
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
+    typealias SwiftType = UInt64?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt64.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt64.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypePaneInfo: FfiConverterRustBuffer {
     typealias SwiftType = [PaneInfo]
 
@@ -1534,6 +1793,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_wezterm_ios_core_checksum_method_muxclient_disconnect() != 30190) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_wezterm_ios_core_checksum_method_muxclient_fetch_lines() != 64769) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_wezterm_ios_core_checksum_method_muxclient_kill() != 65289) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1546,7 +1808,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_wezterm_ios_core_checksum_method_muxclient_send_input() != 5945) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_wezterm_ios_core_checksum_method_muxclient_spawn() != 39765) {
+    if (uniffi_wezterm_ios_core_checksum_method_muxclient_send_paste() != 24368) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wezterm_ios_core_checksum_method_muxclient_spawn() != 57698) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_wezterm_ios_core_checksum_method_muxclient_split_pane() != 40104) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_wezterm_ios_core_checksum_method_clientdelegate_on_snapshot() != 61827) {
