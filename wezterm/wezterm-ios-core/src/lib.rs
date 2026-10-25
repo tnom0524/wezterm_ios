@@ -1,7 +1,7 @@
 //! wezterm mux の iOS クライアント向け Rust コア。
 //!
 //! poc-attach v1 の Transport / Conn / PaneState を土台に、DESIGN-ios.md の
-//! API（connect / list_panes / attach / send_input / resize / spawn / split_pane / disconnect +
+//! API（connect / list_panes / attach / send_input / resize / restore_sizes / spawn / split_pane / disconnect +
 //! ClientDelegate コールバック + Snapshot 型）を UniFFI(proc-macro) で公開する。
 //!
 //! スレッドモデル:
@@ -27,7 +27,9 @@ use codec::{
 use config::keyassignment::SpawnTabDomain;
 use mux::client::ClientId;
 use mux::pane::PaneId;
-use mux::tab::{PaneEntry, PaneNode, SplitDirection as MuxSplitDirection, SplitRequest, SplitSize};
+use mux::tab::{
+    PaneEntry, PaneNode, SplitDirection as MuxSplitDirection, SplitRequest, SplitSize, TabId,
+};
 use std::collections::HashMap;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
@@ -177,6 +179,11 @@ pub(crate) enum Command {
         pane_id: u64,
         reply: Reply<()>,
     },
+    /// 閲覧前に保存した同タブ全ペインの寸法をサーバーへ送り返す。
+    RestoreSizes {
+        tab_id: u64,
+        reply: Reply<()>,
+    },
     FetchLines {
         pane_id: u64,
         first_row: i64,
@@ -303,6 +310,15 @@ impl MuxClient {
         self.dispatch(|reply| Command::Kill { pane_id, reply })
     }
 
+    /// 閲覧を終えるときに呼ぶ。attach / resize の直前に保存しておいた
+    /// 同タブ全ペインの寸法（rows/cols/pixel/dpi）をサーバーへ送り返し、
+    /// Mac 側 GUI が持つ寸法との食い違いを解消する。
+    /// 各 Resize の UnitResponse を待ってから返るので、戻った直後に切断してよい。
+    /// 保存が無ければ何もしない。disconnect() 時には未復元の全タブを自動で復元する。
+    pub fn restore_sizes(&self, tab_id: u64) -> Result<(), IosCoreError> {
+        self.dispatch(|reply| Command::RestoreSizes { tab_id, reply })
+    }
+
     /// スクロールバック履歴行を取得する（GetLines RPC）。
     /// first_row: 取得開始 StableRowIndex、count: 最大行数。
     /// 色解決済みの Row スライスを返す（不足行は空 Row）。
@@ -345,6 +361,7 @@ pub fn connect(
         delegate,
         panes: HashMap::new(),
         palettes: HashMap::new(),
+        saved_sizes: HashMap::new(),
     };
     std::thread::Builder::new()
         .name("wezterm-ios-core-engine".into())
@@ -363,6 +380,16 @@ struct Engine {
     delegate: Box<dyn ClientDelegate>,
     panes: HashMap<PaneId, PaneState>,
     palettes: HashMap<PaneId, ColorPalette>,
+    /// 自分の Resize を送る前に控えた、タブごとの全ペイン寸法（restore_sizes で戻す）。
+    saved_sizes: HashMap<TabId, SavedTabSizes>,
+}
+
+/// 1 タブ分の「閲覧前」寸法。
+struct SavedTabSizes {
+    /// 左端ペイン（PaneNode 木で最初に出る leaf、left==0 && top==0 を優先）。
+    /// 横分割タブの高さはこのペインの rows で決まるので、復元時は最後に送る。
+    leftmost: PaneId,
+    sizes: HashMap<PaneId, TerminalSize>,
 }
 
 impl Engine {
@@ -480,13 +507,7 @@ impl Engine {
                 reply,
             } => {
                 let res = self
-                    .conn
-                    .send(Pdu::Resize(Resize {
-                        containing_tab_id: tab_id as usize,
-                        pane_id: pane_id as PaneId,
-                        size: term_size(cols, rows),
-                    }))
-                    .map(|_| ())
+                    .do_resize(pane_id as PaneId, tab_id as TabId, cols, rows)
                     .map_err(|e| format!("{:#}", e));
                 let _ = reply.send(res);
             }
@@ -524,6 +545,12 @@ impl Engine {
                 self.palettes.remove(&(pane_id as PaneId));
                 let _ = reply.send(res);
             }
+            Command::RestoreSizes { tab_id, reply } => {
+                let res = self
+                    .do_restore_sizes(tab_id as TabId)
+                    .map_err(|e| format!("{:#}", e));
+                let _ = reply.send(res);
+            }
             Command::FetchLines {
                 pane_id,
                 first_row,
@@ -535,7 +562,14 @@ impl Engine {
                     .map_err(|e| format!("{:#}", e));
                 let _ = reply.send(res);
             }
-            Command::Disconnect => return true,
+            Command::Disconnect => {
+                // 切断前に、まだ戻していないタブの寸法を全部戻す（失敗しても切断は続行）。
+                let tabs: Vec<TabId> = self.saved_sizes.keys().copied().collect();
+                for tab_id in tabs {
+                    let _ = self.do_restore_sizes(tab_id);
+                }
+                return true;
+            }
         }
         false
     }
@@ -572,6 +606,9 @@ impl Engine {
             .map(|l| l.entry.tab_id)
             .with_context(|| format!("pane_id={} が見つかりません", pid))?;
 
+        // 自分の寸法で上書きする前に、同タブ全ペインの寸法を控える（restore_sizes で戻す）。
+        self.save_tab_sizes_if_absent(tab_id, &leaves);
+
         self.conn.rpc(Pdu::Resize(Resize {
             containing_tab_id: tab_id,
             pane_id: pid,
@@ -592,6 +629,130 @@ impl Engine {
             }
         }
         Ok(())
+    }
+
+    /// 自分の画面寸法で Resize を送る。そのタブの寸法をまだ控えていなければ
+    /// （バックグラウンド復帰後など、restore 済みで再送するケース）先に控える。
+    fn do_resize(&mut self, pid: PaneId, tab_id: TabId, cols: u32, rows: u32) -> anyhow::Result<()> {
+        if !self.saved_sizes.contains_key(&tab_id) {
+            let leaves = self.query_leaves()?;
+            self.save_tab_sizes_if_absent(tab_id, &leaves);
+        }
+        self.conn.send(Pdu::Resize(Resize {
+            containing_tab_id: tab_id,
+            pane_id: pid,
+            size: term_size(cols, rows),
+        }))?;
+        Ok(())
+    }
+
+    /// ListPanes の結果から tab_id に属する全ペインの寸法と左端ペインを控える。
+    /// 既に控えてある（＝まだ restore していない）タブは上書きしない:
+    /// その場合サーバー上の寸法は既に自分のもので、控え直すと元に戻せなくなる。
+    fn save_tab_sizes_if_absent(&mut self, tab_id: TabId, leaves: &[Leaf]) {
+        if self.saved_sizes.contains_key(&tab_id) {
+            return;
+        }
+        let entries: Vec<&PaneEntry> = leaves
+            .iter()
+            .map(|l| &l.entry)
+            .filter(|e| e.tab_id == tab_id)
+            .collect();
+        let Some(leftmost) = leftmost_pane(&entries) else {
+            return;
+        };
+        let sizes = entries.iter().map(|e| (e.pane_id, e.size)).collect();
+        self.saved_sizes.insert(tab_id, SavedTabSizes { leftmost, sizes });
+    }
+
+    /// 控えてあった寸法を同タブの全ペインへ送り返す（左端ペインは最後）。
+    /// 各 Resize は UnitResponse を待つので、戻った時点でサーバーに反映済み。
+    fn do_restore_sizes(&mut self, tab_id: TabId) -> anyhow::Result<()> {
+        let Some(saved) = self.saved_sizes.remove(&tab_id) else {
+            return Ok(()); // 控えが無い（既に戻した／一度も開いていない）
+        };
+        // 閲覧中に split で増えたペインがあり得るので、現在の一覧を取り直す。
+        let leaves = self.query_leaves()?;
+        let entries: Vec<&PaneEntry> = leaves
+            .iter()
+            .map(|l| &l.entry)
+            .filter(|e| e.tab_id == tab_id)
+            .collect();
+        if entries.is_empty() {
+            return Ok(()); // タブごと消えていた
+        }
+
+        // 左端ペイン: 控えた id がまだあればそれ、無ければ現在の木から求める。
+        let leftmost = entries
+            .iter()
+            .find(|e| e.pane_id == saved.leftmost)
+            .map(|e| e.pane_id)
+            .or_else(|| leftmost_pane(&entries))
+            .unwrap();
+
+        // 閲覧中に生まれたペインの rows/pixel_height/dpi に使う基準（左端ペインの控え）。
+        // 左端の現在値が dpi!=0（＝閲覧中に GUI 側が設定し直した）ならそちらを優先する。
+        let leftmost_entry = entries.iter().find(|e| e.pane_id == leftmost).unwrap();
+        let reference = if leftmost_entry.size.dpi != 0 {
+            leftmost_entry.size
+        } else {
+            saved
+                .sizes
+                .get(&leftmost)
+                .copied()
+                .unwrap_or(leftmost_entry.size)
+        };
+
+        // 左端を最後にした送信順（タブの高さは左端の rows で確定するため）。
+        let mut ordered: Vec<&PaneEntry> = entries
+            .iter()
+            .copied()
+            .filter(|e| e.pane_id != leftmost)
+            .collect();
+        ordered.push(leftmost_entry);
+
+        let mut first_err: Option<anyhow::Error> = None;
+        for e in ordered {
+            let cur = e.size;
+            let target = match saved.sizes.get(&e.pane_id) {
+                Some(s) => {
+                    // 自分の Resize は常に dpi=0。現在値が dpi!=0 なら閲覧中に Mac 等の
+                    // GUI クライアントが設定し直した寸法なので、そちらを正として触らない。
+                    if cur.dpi != 0 {
+                        continue;
+                    }
+                    *s
+                }
+                None => {
+                    // 閲覧中に生まれたペイン: 高さ系は基準（左端）に合わせ、幅系は現状維持。
+                    if cur.dpi != 0 {
+                        continue;
+                    }
+                    TerminalSize {
+                        rows: reference.rows,
+                        cols: cur.cols,
+                        pixel_width: cur.pixel_width,
+                        pixel_height: reference.pixel_height,
+                        dpi: reference.dpi,
+                    }
+                }
+            };
+            let res = self.conn.rpc(Pdu::Resize(Resize {
+                containing_tab_id: tab_id,
+                pane_id: e.pane_id,
+                size: target,
+            }));
+            if let Err(err) = res {
+                // 1 枚失敗しても残りは送る（左端が最後なので高さは極力戻す）。
+                if first_err.is_none() {
+                    first_err = Some(err.context(format!("pane_id={} の寸法復元", e.pane_id)));
+                }
+            }
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
     fn do_spawn(
@@ -728,6 +889,16 @@ struct Leaf {
     tab_index: u32,
     tab_title: String,
     window_title: String,
+}
+
+/// 同一タブのペイン列（PaneNode 木の出現順）から左端ペインを選ぶ。
+/// left==0 && top==0 の entry を優先し、無ければ木で最初に出る leaf。
+fn leftmost_pane(entries: &[&PaneEntry]) -> Option<PaneId> {
+    entries
+        .iter()
+        .find(|e| e.left_col == 0 && e.top_row == 0)
+        .or_else(|| entries.first())
+        .map(|e| e.pane_id)
 }
 
 fn collect_leaves(node: &PaneNode, out: &mut Vec<PaneEntry>) {

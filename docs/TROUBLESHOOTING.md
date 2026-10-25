@@ -94,6 +94,24 @@ The simulator shares the Mac's network stack: the Mac's Tailscale must be connec
 own command line (it contains the socat string you're about to start/kill), taking your
 session down with exit 255. Use `pkill -x socat`, or separate kill/start SSH calls.
 
+### Desktop pane keeps the phone's size after the app died (prompt in the middle of the window)
+
+The app gives the sizes back when a pane is closed, switched, backgrounded or the app exits
+normally (ARCHITECTURE.md, "Pane sizes"). After a force-kill or dropped connection it cannot,
+and the desktop GUI will not resend a size it believes is already in place. Write the size
+the GUI holds straight back to the server (every field, dpi included):
+
+```bash
+ssh -N -L 17799:/run/user/1000/wezterm/sock <server> &     # or point at your socat port
+WEZTERM_MUX_ADDR=127.0.0.1:17799 cargo run -p wezterm-ios-core --example set_pane_size -- \
+    <tab_id> <pane_id> <rows> <cols> <pixel_width> <pixel_height> <dpi>
+```
+
+`wezterm cli list --format json` on the server shows all fields; take them from a sibling
+pane the phone never touched. Note that `wezterm cli kill-pane` folds the dead pane's width
+into its neighbour on the server only, which leaves the same kind of mismatch; fix it the
+same way.
+
 ### socat `range=` syntax
 `range=100.64.0.11/32` requires `TCP4-LISTEN` (with plain `TCP-LISTEN` you get
 "syntax error in range … of unspecified address family").

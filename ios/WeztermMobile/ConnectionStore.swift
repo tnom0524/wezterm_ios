@@ -32,6 +32,12 @@ final class ConnectionStore: ObservableObject {
     @Published var panes: [PaneInfo] = []
     @Published var snapshot: Snapshot? = nil
     @Published var attachedPaneId: UInt64? = nil
+    /// attach 中のペインが属するタブ。閲覧を終えるときに寸法復元（restoreSizes）の鍵に使う。
+    /// attachedPaneId が nil（切替中・バックグラウンド中）でも、復元が済むまでは保持する。
+    private(set) var attachedTabId: UInt64? = nil
+    /// paneViewDisappeared() が起動した復元タスク。直後の attach はこれを待ってから進む
+    /// （復元 → attach の順でエンジンに届くことを保証する）。
+    private var pendingRestore: Task<Void, Never>? = nil
     @Published var isConnected: Bool = false
     @Published var isConnecting: Bool = false
     @Published var errorMessage: String? = nil
@@ -75,6 +81,17 @@ final class ConnectionStore: ObservableObject {
 
     init() {
         delegate.store = self
+        // 強制終了ではなく通常終了（タスクスイッチャーからのスワイプ等）なら、
+        // 同期的に寸法を戻してから死ぬ。Rust 側の RPC 1 往復分だけメインスレッドを塞ぐ。
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.willTerminateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.restoreSizesSynchronously()
+            }
+        }
     }
 
     // MARK: - Public API
@@ -119,6 +136,11 @@ final class ConnectionStore: ObservableObject {
 
     func attach(pane: PaneInfo) async {
         guard let c = client else { return }
+        // 直前まで見ていたタブの寸法をまだ戻していなければ、先に戻す
+        // （Rust 側は attach 時に「控えが無ければ控える」ので、戻してから attach する順序が重要）。
+        await pendingRestore?.value
+        pendingRestore = nil
+        await restoreSizesIfNeeded()
         let pid = pane.paneId
         let cols = pane.cols
         let rows = pane.rows
@@ -128,9 +150,49 @@ final class ConnectionStore: ObservableObject {
         switch result {
         case .success:
             attachedPaneId = pid
+            attachedTabId = pane.tabId
         case .failure(let e):
             errorMessage = e.localizedDescription
         }
+    }
+
+    // MARK: - Pane size restore
+
+    /// ターミナル画面を閉じた（ペイン一覧へ戻った）ときに呼ぶ。
+    /// そのペインに attach したままなら購読対象から外し、タブの寸法を元に戻す。
+    /// 別ペインへ切替済み（attachedPaneId が別の値）の場合は何もしない:
+    /// 切替時の復元は attach() が先に済ませている。
+    func paneViewDisappeared(_ pane: PaneInfo) {
+        guard attachedPaneId == pane.paneId else { return }
+        attachedPaneId = nil
+        pendingRestore = Task { await restoreSizesIfNeeded() }
+    }
+
+    /// バックグラウンド遷移時: attach は維持したまま寸法だけ Mac 側の値に戻す。
+    /// 復帰後は TerminalView が自分の寸法を再送する（Rust 側がその直前に再び控える）。
+    func restoreSizesForBackground() async {
+        guard let c = client, let tabId = attachedTabId else { return }
+        await Self.callRestore(c, tabId: tabId)
+    }
+
+    /// attachedTabId が残っていれば寸法を復元して忘れる。
+    private func restoreSizesIfNeeded() async {
+        guard let c = client, let tabId = attachedTabId else { return }
+        attachedTabId = nil
+        await Self.callRestore(c, tabId: tabId)
+    }
+
+    private static func callRestore(_ c: MuxClient, tabId: UInt64) async {
+        _ = await Task.detached(priority: .userInitiated) {
+            Result { try c.restoreSizes(tabId: tabId) }
+        }.value
+    }
+
+    /// アプリ終了通知用: メインスレッド上で同期的に復元する（await できないため）。
+    private func restoreSizesSynchronously() {
+        guard let c = client, let tabId = attachedTabId else { return }
+        attachedTabId = nil
+        try? c.restoreSizes(tabId: tabId)
     }
 
     // MARK: - Pane creation
@@ -226,12 +288,14 @@ final class ConnectionStore: ObservableObject {
     }
 
     func disconnect() {
+        // Rust 側の disconnect() が、未復元のタブ寸法を全部戻してからソケットを閉じる。
         client?.disconnect()
         client = nil
         isConnected = false
         panes = []
         snapshot = nil
         attachedPaneId = nil
+        attachedTabId = nil
         rowCache = [:]
         physicalTop = 0
         scrollbackTop = 0
@@ -326,6 +390,7 @@ final class ConnectionStore: ObservableObject {
         scrollbackTop = 0
         loadedHistoryTop = 0
         attachedPaneId = nil   // 旧ペインの snapshot 到着を即座に遮断
+        // 旧タブの寸法復元は attach() の中で（attachedTabId を手がかりに）行う
         await attach(pane: pane)
     }
 
@@ -390,6 +455,7 @@ final class ConnectionStore: ObservableObject {
         disconnectReason = reason
         isConnected = false
         client = nil
+        attachedTabId = nil   // 接続が死んだので戻しようがない
     }
 
     // MARK: - Private render helpers

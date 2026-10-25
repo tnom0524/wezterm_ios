@@ -34,7 +34,7 @@ Key PDUs used by this client:
 | `GetPaneRenderChanges` | subscribe; server then *pushes* screen deltas unilaterally (serial=0) |
 | `GetLines` | fetch arbitrary `StableRowIndex` ranges (scrollback) |
 | `WriteToPane` | key/paste input |
-| `Resize` | reflow the pane to the phone's grid |
+| `Resize` | reflow the pane to the phone's grid; on close, send every pane of the tab its pre-attach size back (see below) |
 | `SpawnV2` / `SplitPane` / `KillPane` | new tabs / split panes from the app (also used by the automated smoke test) |
 
 Because the server pushes rendered *line data* (not a byte stream), the client needs no
@@ -63,7 +63,7 @@ Swift ◀─(delegate callbacks)── Snapshot/Row conversion ◀── PDU dec
   `mouse_grabbed` (see Scrolling below).
 - Public API (UniFFI proc-macro mode): `connect(addr, delegate)`,
   `list_panes`, `attach(pane, cols, rows)`, `send_input`, `resize`, `fetch_lines`,
-  `spawn(window_id, …)`, `split_pane(pane_id, direction)`, `kill`, `disconnect`; delegate
+  `spawn(window_id, …)`, `split_pane(pane_id, direction)`, `kill`, `restore_sizes(tab_id)`, `disconnect`; delegate
   receives `on_snapshot` / `on_disconnected`. `PaneInfo` carries `tab_index` / `tab_title` /
   `window_title` so the app can group panes by tab (color-coded sections).
 
@@ -80,6 +80,30 @@ Swift ◀─(delegate callbacks)── Snapshot/Row conversion ◀── PDU dec
   the "fake document" technique — the document *is* the IME marked text. Committed text
   is sent as UTF-8; composition stays local (strip above the accessory bar). This is
   what makes Japanese flick input work.
+
+## Pane sizes: borrow, then give back
+
+The mux server keeps **one** size per pane; the last `Resize` wins. The phone's `Resize`
+(dpi 0, no pixel size) therefore clobbers what the desktop GUI set, and the desktop client
+never resends a size equal to its own cache (`clientpane.rs`), so after the phone leaves,
+the pty stays phone-sized and TUIs render in the middle of the desktop window. Worse, a
+horizontally split tab takes its height from the left-most pane (`tab.rs`), so a stale row
+count there survives desktop window resizes.
+
+The core therefore treats the phone's size as a loan:
+
+- **Before its first `Resize` for a tab** (`attach`, or `resize` after a restore) it runs
+  `ListPanes` and stores the size (rows/cols/pixel/dpi) of every pane in that tab plus the
+  left-most pane id.
+- **`restore_sizes(tab_id)`** re-lists the tab and sends each pane its stored size, left-most
+  pane last. Panes born during the visit (desktop or `wezterm cli` splits) get rows /
+  pixel_height / dpi from the left-most pane and keep their own cols. A pane whose current
+  dpi is non-zero was re-sized by a GUI client after us and is left alone. Each `Resize`
+  waits for its `UnitResponse`, so a `disconnect` right after is safe; `disconnect` itself
+  restores every tab still outstanding.
+- The app calls it when the terminal view closes, before attaching another pane, on
+  `scenePhase == .background` (and re-sends its own size on `.active`), and on
+  `willTerminate`. A force-kill or loss of signal cannot restore; see TROUBLESHOOTING.md.
 
 ## Scrolling: two modes, chosen per snapshot
 

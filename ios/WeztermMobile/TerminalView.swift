@@ -74,10 +74,13 @@ struct TerminalView: View {
     /// ツールバーの「＋」から新しいペインを作ったときに呼ばれる（親が attach・画面切替を行う）
     var onPaneCreated: ((PaneInfo) -> Void)? = nil
     @State private var isKeyboardShown = false
+    @Environment(\.scenePhase) private var scenePhase
 
     // MARK: Resize state
     @State private var resizeTask: Task<Void, Never>? = nil
     @State private var lastSentGrid: (cols: UInt32, rows: UInt32)? = nil
+    /// true = バックグラウンドで寸法を Mac 側の値に戻した（復帰時に自分の寸法を再送する）
+    @State private var sizesRestoredInBackground = false
 
     // MARK: IME composing state
     /// 変換中テキスト（nil = IME非活性）。KeyInputView のストリップ表示に使う
@@ -191,7 +194,28 @@ struct TerminalView: View {
         .preferredColorScheme(.dark)
         // 画面表示時に自動でキーボードフォーカスを取得
         .onAppear { isKeyboardShown = true }
-        .onDisappear { resizeTask?.cancel() }
+        .onDisappear {
+            resizeTask?.cancel()
+            // 一覧へ戻った: このペインに attach したままなら、タブの寸法を Mac 側の値へ戻す
+            store.paneViewDisappeared(pane)
+        }
+        // バックグラウンド中は Mac 側の寸法に戻し、復帰したら自分の寸法を送り直す
+        .onChange(of: scenePhase) { _, phase in
+            switch phase {
+            case .background:
+                resizeTask?.cancel()
+                sizesRestoredInBackground = true
+                Task { await store.restoreSizesForBackground() }
+            case .active:
+                guard sizesRestoredInBackground else { return }
+                sizesRestoredInBackground = false
+                if let grid = lastSentGrid {
+                    store.resize(paneId: pane.paneId, tabId: pane.tabId, cols: grid.cols, rows: grid.rows)
+                }
+            default:
+                break
+            }
+        }
         // Disconnection banner
         .overlay(alignment: .top) {
             if let reason = store.disconnectReason {
