@@ -61,6 +61,10 @@ pub struct PaneInfo {
     pub tab_title: String,
     /// ウィンドウのタイトル（未設定なら空文字）。
     pub window_title: String,
+    /// ペインの cwd を file:// URL のまま渡す（例 "file://host/home/ubuntu/proj"、不明なら空文字）。
+    /// mux がプロセスの cwd を追っているので、シェル側の OSC 7 が無くても入る。
+    /// UI 側（PaneGrouping.swift の ProjectName）がタブの表示名に使う。
+    pub working_dir: String,
 }
 
 /// SpawnV2 / SplitPane の結果。
@@ -592,6 +596,11 @@ impl Engine {
                     tab_index: l.tab_index,
                     tab_title: l.tab_title.clone(),
                     window_title: l.window_title.clone(),
+                    working_dir: e
+                        .working_dir
+                        .as_ref()
+                        .map(|u| u.url.to_string())
+                        .unwrap_or_default(),
                 }
             })
             .collect())
